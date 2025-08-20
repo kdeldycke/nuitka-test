@@ -1,0 +1,73 @@
+---
+"on":
+  push:
+    branches:
+      - main
+
+jobs:
+
+  build:
+    strategy:
+      matrix:
+        os:
+          - ubuntu-24.04-arm  # arm64
+          - ubuntu-24.04      # x86
+          - macos-15          # arm64
+          - macos-13          # x86
+          - windows-11-arm    # arm64
+          - windows-2025      # x86
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5.0.0
+      - name: Install uv
+        run: |
+          python -m pip install uv==0.8.12
+      - name: Setup venv
+        # XXX Python for Windows ARM64 is available through uv but is not going to be installed by default.
+        # We have to explicitly install it for it to be picked-up by Nuitka.
+        # https://github.com/astral-sh/uv/issues/12906
+        # https://docs.astral.sh/uv/reference/cli/#uv-python
+        # https://github.com/astral-sh/uv/pull/14399
+        run: |
+          uv venv --python ${{ matrix.os == 'windows-11-arm' && '3.13-aarch64' || '3.13' }}
+      - name: Install Nuitka
+        run: >
+          uv pip install nuitka==2.7.12
+      - name: nuitka --version
+        run: |
+          uv run -- nuitka --version
+      - name: Build binary
+        run: >
+          uv run -- nuitka --onefile --assume-yes-for-downloads --output-filename=cli.bin ${{ matrix.module_path }}
+      - name: Install exiftool - Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt --quiet --yes install exiftool
+      - name: Install exiftool - macOS
+        if: runner.os == 'macOS'
+        run: |
+          brew install exiftool
+      - name: Install exiftool - Windows
+        if: runner.os == 'Windows'
+        run: |
+          choco install exiftool --no-progress --yes
+      - name: Binary metadata
+        # Ubuntu:
+        #   CPU Type      : Arm 64-bits (Armv8/AArch64)
+        #   CPU Type      : AMD x86-64
+        # macOS:
+        #   CPU Type      : ARM 64-bit
+        #   CPU Type      : x86 64-bit
+        # Windows
+        #   Machine Type  : ARM64 little endian
+        #   Machine Type  : AMD AMD64
+        run: |
+          exiftool${{ runner.os == 'Windows' && '.exe' || '' }} cli.bin
+      - name: Set binary permissions
+        if: runner.os != 'Windows'
+        run: |
+          chmod +x cli.bin
+      - name: Run binary
+        run: |
+          cli.bin
+

@@ -1,0 +1,11 @@
+[project]
+name = "CLI"
+version = "1.0.0"
+requires-python = ">= 3.11"
+dependencies = ["click"]
+
+[project.scripts]
+cli = "cli.cli_code:my_cli"
+
+[tool.uv]
+package = true
