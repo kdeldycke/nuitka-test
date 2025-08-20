@@ -38,7 +38,7 @@ jobs:
           uv run -- nuitka --version
       - name: Build binary
         run: >
-          uv run -- nuitka --onefile --assume-yes-for-downloads --output-filename=cli.bin ${{ matrix.module_path }}
+          uv run -- nuitka --onefile --assume-yes-for-downloads --output-filename=cli.bin cli/__main__.py
       - name: Install exiftool - Linux
         if: runner.os == 'Linux'
         run: |
