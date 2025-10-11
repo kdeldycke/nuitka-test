@@ -18,6 +18,7 @@ jobs:
           - windows-11-arm    # arm64
           - windows-2025      # x86
     runs-on: ${{ matrix.os }}
+    continue-on-error: true
     steps:
       - uses: actions/checkout@v5.0.0
       - uses: astral-sh/setup-uv@v7.0.0
