@@ -40,7 +40,7 @@ jobs:
           uv run -- nuitka --version
       - name: Build binary
         run: >
-          uv run -- nuitka --onefile --assume-yes-for-downloads --output-filename=cli.bin cli/__main__.py
+          uv run -- nuitka --onefile --assume-yes-for-downloads --output-filename=cli${{ runner.os == 'Windows' && '.exe' || '.bin' }} cli/__main__.py
       - name: Install exiftool - Linux
         if: runner.os == 'Linux'
         run: |
@@ -64,7 +64,7 @@ jobs:
         #   Machine Type  : ARM64 little endian
         #   Machine Type  : AMD AMD64
         run: |
-          exiftool${{ runner.os == 'Windows' && '.exe' || '' }} cli.bin
+          exiftool${{ runner.os == 'Windows' && '.exe' || '' }} cli${{ runner.os == 'Windows' && '.exe' || '.bin' }}
       - name: Set binary permissions
         if: runner.os != 'Windows'
         run: |
@@ -72,5 +72,5 @@ jobs:
       - name: Run binary
         run: |
           ls -lah
-          cli.bin
+          cli${{ runner.os == 'Windows' && '.exe' || '.bin' }}
 
