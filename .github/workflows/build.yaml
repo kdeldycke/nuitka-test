@@ -71,5 +71,6 @@ jobs:
           chmod +x cli.bin
       - name: Run binary
         run: |
+          ls -lah
           cli.bin
 
