@@ -39,6 +39,7 @@ jobs:
         run: |
           uv run -- nuitka --version
       - name: Build binary
+        id: build-binary
         continue-on-error: true
         run: >
           uv run -- nuitka --onefile --assume-yes-for-downloads --output-filename=cli${{ runner.os == 'Windows' && '.exe' || '.bin' }} cli/__main__.py
@@ -46,8 +47,12 @@ jobs:
         uses: actions/upload-artifact@v4.6.2
         with:
           name: nuitka-crash-report-${{ matrix.os }}.xml
-          if-no-files-found: warn
+          if-no-files-found: ignore
           path: nuitka-crash-report.xml
+      - if: steps.build-binary.outcome == 'failure'
+        run: |
+          echo "Nuitka build failed, skipping the rest of the steps."
+          exit 1
       - name: Install exiftool - Linux
         if: runner.os == 'Linux'
         run: |
