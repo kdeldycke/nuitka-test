@@ -84,5 +84,4 @@ jobs:
       - name: Run binary
         run: |
           ls -lah
-          cli${{ runner.os == 'Windows' && '.exe' || '.bin' }}
-
+          .${{ runner.os == 'Windows' && '\cli.exe' || '/cli.bin' }}
