@@ -83,5 +83,4 @@ jobs:
           chmod +x cli.bin
       - name: Run binary
         run: |
-          ls -lah
-          .${{ runner.os == 'Windows' && '\cli.exe' || '/cli.bin' }}
+          ${{ runner.os == 'Windows' && '.\cli.exe' || './cli.bin' }}
