@@ -44,7 +44,7 @@ jobs:
         id: build-binary
         continue-on-error: true
         run: >
-          uv run -- nuitka --onefile --assume-yes-for-downloads --output-filename=cli${{ runner.os == 'Windows' && '.exe' || '.bin' }} cli/__main__.py
+          uv run -- nuitka --verbose --onefile --assume-yes-for-downloads --output-filename=cli${{ runner.os == 'Windows' && '.exe' || '.bin' }} cli/__main__.py
       - name: Upload Nuitka crash report
         uses: actions/upload-artifact@v4.6.2
         with:
