@@ -33,8 +33,10 @@ jobs:
         run: |
           uv venv --python ${{ matrix.os == 'windows-11-arm' && '3.13-aarch64' || '3.13' }}
       - name: Install Nuitka
-        run: >
-          uv pip install "nuitka [onefile] == 2.8.0"
+        # run: |
+        #   uv pip install "nuitka [onefile] == 2.8.0"
+        run: |
+          uv pip install "nuitka @ git+https://github.com/Nuitka/Nuitka.git@factory"
       - name: nuitka --version
         run: |
           uv run -- nuitka --version
