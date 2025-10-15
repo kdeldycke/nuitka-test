@@ -7,34 +7,38 @@
 jobs:
 
   build:
+    name: ${{ matrix.os }} + ${{ matrix['python-source'] }} Python
     strategy:
       matrix:
         os:
-          #- ubuntu-24.04-arm  # arm64
-          #- ubuntu-24.04      # x86
+          - ubuntu-24.04-arm  # arm64
+          - ubuntu-24.04      # x86
           - macos-26          # arm64
-          - macos-15          # arm64
           - macos-15-intel    # x86
-          #- windows-11-arm    # arm64
-          #- windows-2025      # x86
-        uv-version:
-          - "0.9.2"
-          - "0.8.24"
-          - "0.8.8"
-          - "0.7.22"
+          - windows-11-arm    # arm64
+          - windows-2025      # x86
+        python-source:
+          - "GitHub"
+          - "Astral"
     runs-on: ${{ matrix.os }}
     continue-on-error: true
     steps:
       - uses: actions/checkout@v5.0.0
-      - uses: astral-sh/setup-uv@v7.0.0
+      - if: matrix['python-source'] == 'Astral'
+        uses: astral-sh/setup-uv@v7.0.0
+      - if: matrix['python-source'] == 'GitHub'
+        uses: actions/setup-python@v6.0.0
         with:
-          version: ${{ matrix['uv-version'] }}
+          python-version: "3.13"
+      - if: matrix['python-source'] == 'GitHub'
+        run: |
+          python -m pip install uv
       - name: Setup venv
         run: |
           uv venv --python 3.13
       - name: Install Nuitka
         run: |
-          uv pip install "nuitka @ git+https://github.com/Nuitka/Nuitka.git@factory"
+          uv pip install "nuitka [onefile] == 2.8.1"
       - name: nuitka --version
         run: |
           uv run -- nuitka --version
