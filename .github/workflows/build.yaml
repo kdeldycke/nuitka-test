@@ -34,22 +34,22 @@ jobs:
           python-version: "3.13"
       - if: matrix['python-source'] == 'GitHub'
         run: |
-          python -m pip install "uv == 0.10.2"
+          python -m pip install "uv==0.10.2"
       - name: Setup venv
         run: |
-          uv venv --python 3.13
+          uv --no-progress venv --python 3.13
       - name: Install Nuitka
-        # uv pip install "nuitka @ git+https://github.com/Nuitka/Nuitka.git@factory"
+        # uv --no-progress pip install "nuitka @ git+https://github.com/Nuitka/Nuitka.git@factory"
         run: |
-          uv pip install "Nuitka[onefile]==4.0"
+          uv --no-progress -vv pip install "Nuitka[onefile]==4.0"
       - name: nuitka --version
         run: |
-          uv run -- nuitka --version
+          uv --no-progress run -- nuitka --version
       - name: Build binary
         id: build-binary
         continue-on-error: true
         run: >
-          uv run -- nuitka --mode=onefile --assume-yes-for-downloads --output-filename=cli${{ runner.os == 'Windows' && '.exe' || '.bin' }} cli/__main__.py
+          uv --no-progress run -- nuitka --mode=onefile --assume-yes-for-downloads --output-filename=cli${{ runner.os == 'Windows' && '.exe' || '.bin' }} cli/__main__.py
       - name: Upload Nuitka crash report
         uses: actions/upload-artifact@v6.0.0
         with:
