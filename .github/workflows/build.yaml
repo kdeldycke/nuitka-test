@@ -23,24 +23,25 @@ jobs:
     runs-on: ${{ matrix.os }}
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v5.0.0
+      - uses: actions/checkout@v6.0.2
       - if: matrix['python-source'] == 'Astral'
-        uses: astral-sh/setup-uv@v7.1.0
+        uses: astral-sh/setup-uv@v7.2.1
         with:
-          version: "0.9.2"
+          version: "0.10.2"
       - if: matrix['python-source'] == 'GitHub'
-        uses: actions/setup-python@v6.0.0
+        uses: actions/setup-python@v6.2.0
         with:
           python-version: "3.13"
       - if: matrix['python-source'] == 'GitHub'
         run: |
-          python -m pip install "uv == 0.9.2"
+          python -m pip install "uv == 0.10.2"
       - name: Setup venv
         run: |
           uv venv --python 3.13
       - name: Install Nuitka
+        # uv pip install "nuitka @ git+https://github.com/Nuitka/Nuitka.git@factory"
         run: |
-          uv pip install "nuitka @ git+https://github.com/Nuitka/Nuitka.git@factory"
+          uv pip install "Nuitka[onefile]==4.0"
       - name: nuitka --version
         run: |
           uv run -- nuitka --version
@@ -48,9 +49,9 @@ jobs:
         id: build-binary
         continue-on-error: true
         run: >
-          uv run -- nuitka --onefile --assume-yes-for-downloads --output-filename=cli${{ runner.os == 'Windows' && '.exe' || '.bin' }} cli/__main__.py
+          uv run -- nuitka --mode=onefile --assume-yes-for-downloads --output-filename=cli${{ runner.os == 'Windows' && '.exe' || '.bin' }} cli/__main__.py
       - name: Upload Nuitka crash report
-        uses: actions/upload-artifact@v4.6.2
+        uses: actions/upload-artifact@v6.0.0
         with:
           name: nuitka-crash-report-${{ matrix.os }}.xml
           if-no-files-found: ignore
