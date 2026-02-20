@@ -41,7 +41,7 @@ jobs:
       - name: Install Nuitka
         # uv --no-progress pip install "nuitka @ git+https://github.com/Nuitka/Nuitka.git@factory"
         run: |
-          uv --no-progress -vv pip install "Nuitka[onefile]==4.0"
+          uv --no-progress -vv pip install "Nuitka[onefile]==4.0.1"
       - name: nuitka --version
         run: |
           uv --no-progress run -- nuitka --version
@@ -49,7 +49,7 @@ jobs:
         id: build-binary
         continue-on-error: true
         run: >
-          uv --no-progress run -- nuitka --mode=onefile --assume-yes-for-downloads --output-filename=cli${{ runner.os == 'Windows' && '.exe' || '.bin' }} cli/__main__.py
+          uv --no-progress run -- nuitka --project --mode=onefile --assume-yes-for-downloads --output-filename=cli${{ runner.os == 'Windows' && '.exe' || '.bin' }} cli/__main__.py
       - name: Upload Nuitka crash report
         uses: actions/upload-artifact@v6.0.0
         with:
