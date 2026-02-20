@@ -41,7 +41,7 @@ jobs:
       - name: Install Nuitka
         # uv --no-progress pip install "nuitka @ git+https://github.com/Nuitka/Nuitka.git@factory"
         run: |
-          uv --no-progress -vv pip install "Nuitka[onefile]==4.0.1" "uv_build"
+          uv --no-progress pip install "Nuitka[onefile]==4.0.1" "uv_build"
       - name: nuitka --version
         run: |
           uv --no-progress run -- nuitka --version
