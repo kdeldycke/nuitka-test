@@ -1,92 +1,76 @@
 ---
+# Minimal reproducer for Nuitka onefile silent-exit bug.
+#
+# When a package's __main__.py is compiled with:
+#   nuitka --onefile mypkg/__main__.py
+# the resulting binary silently exits 0 with zero output (stdout and stderr).
+#
+# Workaround: compile the package directory with --python-flag=-m:
+#   nuitka --onefile --python-flag=-m mypkg/
+name: Reproduce Nuitka onefile silent-exit bug
 "on":
   push:
     branches:
       - main
+  workflow_dispatch:
 
 jobs:
 
-  build:
-    name: ${{ matrix.os }} + ${{ matrix['python-source'] }} Python
-    strategy:
-      matrix:
-        os:
-          - ubuntu-24.04-arm  # arm64
-          - ubuntu-24.04      # x86
-          - macos-26          # arm64
-          - macos-15-intel    # x86
-          - windows-11-arm    # arm64
-          - windows-2025      # x86
-        python-source:
-          - "GitHub"
-          - "Astral"
-    runs-on: ${{ matrix.os }}
-    continue-on-error: true
+  reproduce:
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6.0.2
-      - if: matrix['python-source'] == 'Astral'
-        uses: astral-sh/setup-uv@v7.2.1
-        with:
-          version: "0.10.2"
-      - if: matrix['python-source'] == 'GitHub'
-        uses: actions/setup-python@v6.2.0
-        with:
-          python-version: "3.13"
-      - if: matrix['python-source'] == 'GitHub'
-        run: |
-          python -m pip install "uv==0.10.2"
-      - name: Setup venv
+
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v7.3.0
+
+      - name: Setup
         run: |
           uv --no-progress venv --python 3.13
-      - name: Install Nuitka
+          uv --no-progress sync --frozen
+          uv --no-progress pip install 'nuitka[onefile]==2.8.10'
+
+      - name: Verify CLI works via Python
         run: |
-          uv --no-progress pip install "nuitka @ git+https://github.com/Nuitka/Nuitka.git@factory" "ordered-set" "zstandard" "uv_build"
-      - name: nuitka --version
-        run: |
-          uv --no-progress run -- nuitka --version
-      - name: Build binary
-        id: build-binary
-        continue-on-error: true
+          echo "=== python -m mypkg ==="
+          uv run python -m mypkg
+          echo "=== python -m mypkg --version ==="
+          uv run python -m mypkg --version
+          echo "=== console_scripts entry point ==="
+          uv run mypkg-cli --version
+
+      # ── BUG: compile __main__.py file directly ──
+      # Nuitka warns: "To compile a package with a '__main__' module,
+      # specify its containing directory"
+      # The resulting binary silently exits 0 with zero output.
+      - name: "Build: file path (BUG)"
         run: >
-          uv --no-progress run -- nuitka --project --mode=onefile --assume-yes-for-downloads --output-filename=cli${{ runner.os == 'Windows' && '.exe' || '.bin' }} cli/__main__.py
-      - name: Upload Nuitka crash report
-        uses: actions/upload-artifact@v6.0.0
-        with:
-          name: nuitka-crash-report-${{ matrix.os }}.xml
-          if-no-files-found: ignore
-          path: nuitka-crash-report.xml
-      - if: steps.build-binary.outcome == 'failure'
+          uv run nuitka --onefile --assume-yes-for-downloads
+          --output-filename=mypkg-file.bin mypkg/__main__.py
+
+      - name: "Test: file path (BUG — silent exit, no output)"
         run: |
-          echo "Nuitka build failed, skipping the rest of the steps."
-          exit 1
-      - name: Install exiftool - Linux
-        if: runner.os == 'Linux'
+          set +e
+          echo "--- mypkg-file.bin ---"
+          ./mypkg-file.bin 2>&1;          echo "exit: $?"
+          echo "--- mypkg-file.bin --version ---"
+          ./mypkg-file.bin --version 2>&1; echo "exit: $?"
+          echo "--- stdout bytes ---"
+          ./mypkg-file.bin --version 2>/dev/null | wc -c
+
+      # ── WORKAROUND: compile the package directory with --python-flag=-m ──
+      # This is the approach Nuitka recommends in the warning message.
+      # The binary works correctly.
+      - name: "Build: package directory + -m (WORKAROUND)"
+        run: >
+          uv run nuitka --onefile --assume-yes-for-downloads
+          --python-flag=-m --output-filename=mypkg-dir.bin mypkg/
+
+      - name: "Test: package directory + -m (WORKS)"
         run: |
-          sudo apt --quiet --yes install exiftool
-      - name: Install exiftool - macOS
-        if: runner.os == 'macOS'
-        run: |
-          brew install exiftool
-      - name: Install exiftool - Windows
-        if: runner.os == 'Windows'
-        run: |
-          choco install exiftool --no-progress --yes
-      - name: Binary metadata
-        # Ubuntu:
-        #   CPU Type      : Arm 64-bits (Armv8/AArch64)
-        #   CPU Type      : AMD x86-64
-        # macOS:
-        #   CPU Type      : ARM 64-bit
-        #   CPU Type      : x86 64-bit
-        # Windows
-        #   Machine Type  : ARM64 little endian
-        #   Machine Type  : AMD AMD64
-        run: |
-          exiftool${{ runner.os == 'Windows' && '.exe' || '' }} cli${{ runner.os == 'Windows' && '.exe' || '.bin' }}
-      - name: Set binary permissions
-        if: runner.os != 'Windows'
-        run: |
-          chmod +x cli.bin
-      - name: Run binary
-        run: |
-          ${{ runner.os == 'Windows' && '.\cli.exe' || './cli.bin' }}
+          set +e
+          echo "--- mypkg-dir.bin ---"
+          ./mypkg-dir.bin 2>&1;          echo "exit: $?"
+          echo "--- mypkg-dir.bin --version ---"
+          ./mypkg-dir.bin --version 2>&1; echo "exit: $?"
+          echo "--- stdout bytes ---"
+          ./mypkg-dir.bin --version 2>/dev/null | wc -c

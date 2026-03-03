@@ -3,14 +3,13 @@ build-backend = "uv_build"
 requires = [ "uv-build>=0.9" ]
 
 [project]
-name = "CLI"
+name = "mypkg"
 version = "1.0.0"
 requires-python = ">=3.11"
-dependencies = ["click"]
+dependencies = [ "click" ]
 
 [project.scripts]
-cli = "cli.cli_code:my_cli"
+mypkg-cli = "mypkg.__main__:main"
 
 [tool.uv]
-# Package is at root level, not in "./src/".
 build-backend.module-root = ""
