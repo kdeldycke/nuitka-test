@@ -8,7 +8,7 @@
 jobs:
 
   build:
-    name: ${{ matrix.os }} + ${{ matrix['python-source'] }} Python
+    name: ${{ matrix.variant }} / ${{ matrix.os }} / ${{ matrix['python-source'] }}
     strategy:
       fail-fast: false
       matrix:
@@ -22,8 +22,17 @@ jobs:
         python-source:
           - "GitHub"
           - "Astral"
+        variant:
+          # Bug A: `--main-entry-point` alone crashes immediately in early
+          # output-path setup with `AttributeError` on `_main_module`.
+          - bug-a
+          # Bug B: same flag plus the `--output-folder-name` workaround
+          # for bug A surfaces the next missing-state failure: NuitkaCodeDeficit
+          # from the first `locateModule` call (no `_main_paths` set up).
+          - bug-b
+          # Baseline: positional package + `--python-flag=-m` builds and runs.
+          - baseline
     runs-on: ${{ matrix.os }}
-    continue-on-error: true
     defaults:
       run:
         shell: bash
@@ -52,73 +61,62 @@ jobs:
         run: |
           uv --no-progress run -- nuitka --version
 
-      # Bug A: `--main-entry-point` used without a positional script crashes
-      # immediately during early output-path setup, before any compilation
-      # starts. `_main_module` is `None` because no positional script was
-      # supplied to populate it, and `_getResultBaseName` dereferences it.
-      - name: "Bug A: --main-entry-point alone (expected to crash in _getResultBaseName)"
-        id: bug-a
-        continue-on-error: true
+      # Bug A — expected to FAIL with:
+      #   AttributeError: 'NoneType' object has no attribute 'getOutputFilename'
+      # at OutputDirectories._getResultBaseName, because no positional script
+      # populated `_main_module`.
+      - name: "Bug A: --main-entry-point alone"
+        if: matrix.variant == 'bug-a'
         run: >
           uv --no-progress run -- nuitka
           --mode=onefile --assume-yes-for-downloads
-          --output-filename="cli-bug-a${BIN_EXT}"
+          --output-filename="cli${BIN_EXT}"
           --main-entry-point=cli=cli.cli_code:my_cli
-          2>&1 | tee bug-a.log
-      - name: "Bug A: assert AttributeError on _main_module"
-        run: |
-          grep -F "'NoneType' object has no attribute 'getOutputFilename'" bug-a.log
 
-      # Bug B: Adding `--output-folder-name` works around bug A but reveals
-      # the next missing-state issue. `--main-entry-point` doesn't populate
-      # `_main_paths` (only the positional-script path via
-      # `addMainScriptDirectory` does), so `setStandardLibraryModules` runs
-      # before the import mechanism is set up and raises NuitkaCodeDeficit.
-      - name: "Bug B: --main-entry-point + --output-folder-name workaround (expected to crash in setStandardLibraryModules)"
-        id: bug-b
-        continue-on-error: true
+      # Bug B — expected to FAIL with:
+      #   nuitka.Errors.NuitkaCodeDeficit: Error, cannot locate modules
+      #   before import mechanism is setup.
+      # at importing.Importing.locateModule, because `_main_paths` is never
+      # populated when `--main-entry-point` is used without a positional
+      # script (only `addMainScriptDirectory` populates it).
+      - name: "Bug B: --main-entry-point + --output-folder-name workaround"
+        if: matrix.variant == 'bug-b'
         run: >
           uv --no-progress run -- nuitka
           --mode=onefile --assume-yes-for-downloads
-          --output-filename="cli-bug-b${BIN_EXT}"
+          --output-filename="cli${BIN_EXT}"
           --output-folder-name=cli-bug-b
           --main-entry-point=cli=cli.cli_code:my_cli
-          2>&1 | tee bug-b.log
-      - name: "Bug B: assert NuitkaCodeDeficit"
-        run: |
-          grep -F "cannot locate modules before import mechanism is setup" bug-b.log
 
-      # Baseline: the legacy positional-module + `--python-flag=-m` approach
-      # builds and runs successfully. If this regresses, the job goes red.
-      - name: "Baseline: positional package + --python-flag=-m (expected to succeed)"
-        id: baseline
+      # Baseline — expected to SUCCEED. The legacy positional-package +
+      # `--python-flag=-m` invocation builds a working binary.
+      - name: "Baseline: positional package + --python-flag=-m"
+        if: matrix.variant == 'baseline'
         run: >
           uv --no-progress run -- nuitka
           --mode=onefile --assume-yes-for-downloads
           --output-filename="cli${BIN_EXT}"
           --python-flag=-m cli
 
-      - name: Upload diagnostic logs and crash report
-        if: always()
+      # Bug B emits a crash report; preserve it for inspection.
+      - name: Upload Nuitka crash report
+        if: always() && matrix.variant == 'bug-b'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: nuitka-diagnostics-${{ matrix.os }}-${{ matrix['python-source'] }}
+          name: nuitka-crash-report-${{ matrix.os }}-${{ matrix['python-source'] }}
           if-no-files-found: ignore
-          path: |
-            bug-a.log
-            bug-b.log
-            nuitka-crash-report.xml
+          path: nuitka-crash-report.xml
 
       - name: Install exiftool - Linux
-        if: runner.os == 'Linux'
+        if: matrix.variant == 'baseline' && runner.os == 'Linux'
         run: |
           sudo apt --quiet --yes install exiftool
       - name: Install exiftool - macOS
-        if: runner.os == 'macOS'
+        if: matrix.variant == 'baseline' && runner.os == 'macOS'
         run: |
           brew install exiftool
       - name: Install exiftool - Windows
-        if: runner.os == 'Windows'
+        if: matrix.variant == 'baseline' && runner.os == 'Windows'
         run: |
           choco install exiftool --no-progress --yes
       - name: Baseline binary metadata
@@ -131,12 +129,14 @@ jobs:
         # Windows
         #   Machine Type  : ARM64 little endian
         #   Machine Type  : AMD AMD64
+        if: matrix.variant == 'baseline'
         run: |
           exiftool${{ runner.os == 'Windows' && '.exe' || '' }} "cli${BIN_EXT}"
       - name: Set baseline binary permissions
-        if: runner.os != 'Windows'
+        if: matrix.variant == 'baseline' && runner.os != 'Windows'
         run: |
           chmod +x "cli${BIN_EXT}"
       - name: Run baseline binary
+        if: matrix.variant == 'baseline'
         run: |
           "./cli${BIN_EXT}"
