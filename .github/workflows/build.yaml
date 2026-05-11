@@ -8,7 +8,7 @@
 jobs:
 
   build:
-    name: ${{ matrix.variant }} / ${{ matrix.os }} / ${{ matrix['python-source'] }}
+    name: ${{ matrix.variant }} / ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
@@ -19,9 +19,6 @@ jobs:
           - macos-15-intel    # x86
           - windows-11-arm    # arm64
           - windows-2025      # x86
-        python-source:
-          - "GitHub"
-          - "Astral"
         variant:
           # Bug A: `--main-entry-point` alone crashes immediately in early
           # output-path setup with `AttributeError` on `_main_module`.
@@ -40,17 +37,9 @@ jobs:
       BIN_EXT: ${{ contains(matrix.os, 'windows') && '.exe' || '.bin' }}
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
-      - if: matrix['python-source'] == 'Astral'
-        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
         with:
           version: "0.11.13"
-      - if: matrix['python-source'] == 'GitHub'
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
-        with:
-          python-version: "3.13.13"
-      - if: matrix['python-source'] == 'GitHub'
-        run: |
-          python -m pip install "uv==0.11.13"
       - name: Setup venv
         run: |
           uv --no-progress venv --python 3.13.13
@@ -59,7 +48,7 @@ jobs:
           uv --no-progress pip install "Nuitka[onefile]==4.1" "uv_build==0.11.13"
       - name: nuitka --version
         run: |
-          uv --no-progress run -- nuitka --version
+          uv --no-progress run -- python -m nuitka --version
 
       # Bug A — expected to FAIL with:
       #   AttributeError: 'NoneType' object has no attribute 'getOutputFilename'
@@ -68,7 +57,7 @@ jobs:
       - name: "Bug A: --main-entry-point alone"
         if: matrix.variant == 'bug-a'
         run: >
-          uv --no-progress run -- nuitka
+          uv --no-progress run -- python -m nuitka
           --mode=onefile --assume-yes-for-downloads
           --output-filename="cli${BIN_EXT}"
           --main-entry-point=cli=cli.cli_code:my_cli
@@ -82,7 +71,7 @@ jobs:
       - name: "Bug B: --main-entry-point + --output-folder-name workaround"
         if: matrix.variant == 'bug-b'
         run: >
-          uv --no-progress run -- nuitka
+          uv --no-progress run -- python -m nuitka
           --mode=onefile --assume-yes-for-downloads
           --output-filename="cli${BIN_EXT}"
           --output-folder-name=cli-bug-b
@@ -93,7 +82,7 @@ jobs:
       - name: "Baseline: positional package + --python-flag=-m"
         if: matrix.variant == 'baseline'
         run: >
-          uv --no-progress run -- nuitka
+          uv --no-progress run -- python -m nuitka
           --mode=onefile --assume-yes-for-downloads
           --output-filename="cli${BIN_EXT}"
           --python-flag=-m cli
@@ -103,7 +92,7 @@ jobs:
         if: always() && matrix.variant == 'bug-b'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: nuitka-crash-report-${{ matrix.os }}-${{ matrix['python-source'] }}
+          name: nuitka-crash-report-${{ matrix.os }}
           if-no-files-found: ignore
           path: nuitka-crash-report.xml
 
