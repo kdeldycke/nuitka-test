@@ -10,6 +10,7 @@ jobs:
   build:
     name: ${{ matrix.os }} + ${{ matrix['python-source'] }} Python
     strategy:
+      fail-fast: false
       matrix:
         os:
           - ubuntu-24.04-arm  # arm64
@@ -23,43 +24,91 @@ jobs:
           - "Astral"
     runs-on: ${{ matrix.os }}
     continue-on-error: true
+    defaults:
+      run:
+        shell: bash
+    env:
+      BIN_EXT: ${{ contains(matrix.os, 'windows') && '.exe' || '.bin' }}
     steps:
-      - uses: actions/checkout@v6.0.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
       - if: matrix['python-source'] == 'Astral'
-        uses: astral-sh/setup-uv@v8.1.0
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
         with:
-          version: "0.11.7"
+          version: "0.11.13"
       - if: matrix['python-source'] == 'GitHub'
-        uses: actions/setup-python@v6.2.0
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         with:
-          python-version: "3.13"
+          python-version: "3.13.13"
       - if: matrix['python-source'] == 'GitHub'
         run: |
-          python -m pip install "uv==0.11.7"
+          python -m pip install "uv==0.11.13"
       - name: Setup venv
         run: |
-          uv --no-progress venv --python 3.13
+          uv --no-progress venv --python 3.13.13
       - name: Install Nuitka
         run: |
-          uv --no-progress pip install "Nuitka[onefile] @ git+https://github.com/Nuitka/Nuitka.git@factory" "uv_build"
+          uv --no-progress pip install "Nuitka[onefile]==4.1" "uv_build==0.11.13"
       - name: nuitka --version
         run: |
           uv --no-progress run -- nuitka --version
-      - name: Build binary
-        id: build-binary
+
+      # Bug A: `--main-entry-point` used without a positional script crashes
+      # immediately during early output-path setup, before any compilation
+      # starts. `_main_module` is `None` because no positional script was
+      # supplied to populate it, and `_getResultBaseName` dereferences it.
+      - name: "Bug A: --main-entry-point alone (expected to crash in _getResultBaseName)"
+        id: bug-a
         continue-on-error: true
         run: >
-          uv --no-progress run -- nuitka --project --mode=onefile --assume-yes-for-downloads --output-filename=cli${{ runner.os == 'Windows' && '.exe' || '.bin' }}
-      - name: Upload Nuitka crash report
-        uses: actions/upload-artifact@v7.0.1
-        with:
-          name: nuitka-crash-report-${{ matrix.os }}.xml
-          if-no-files-found: ignore
-          path: nuitka-crash-report.xml
-      - if: steps.build-binary.outcome == 'failure'
+          uv --no-progress run -- nuitka
+          --mode=onefile --assume-yes-for-downloads
+          --output-filename="cli-bug-a${BIN_EXT}"
+          --main-entry-point=cli=cli.cli_code:my_cli
+          2>&1 | tee bug-a.log
+      - name: "Bug A: assert AttributeError on _main_module"
         run: |
-          echo "Nuitka build failed, skipping the rest of the steps."
-          exit 1
+          grep -F "'NoneType' object has no attribute 'getOutputFilename'" bug-a.log
+
+      # Bug B: Adding `--output-folder-name` works around bug A but reveals
+      # the next missing-state issue. `--main-entry-point` doesn't populate
+      # `_main_paths` (only the positional-script path via
+      # `addMainScriptDirectory` does), so `setStandardLibraryModules` runs
+      # before the import mechanism is set up and raises NuitkaCodeDeficit.
+      - name: "Bug B: --main-entry-point + --output-folder-name workaround (expected to crash in setStandardLibraryModules)"
+        id: bug-b
+        continue-on-error: true
+        run: >
+          uv --no-progress run -- nuitka
+          --mode=onefile --assume-yes-for-downloads
+          --output-filename="cli-bug-b${BIN_EXT}"
+          --output-folder-name=cli-bug-b
+          --main-entry-point=cli=cli.cli_code:my_cli
+          2>&1 | tee bug-b.log
+      - name: "Bug B: assert NuitkaCodeDeficit"
+        run: |
+          grep -F "cannot locate modules before import mechanism is setup" bug-b.log
+
+      # Baseline: the legacy positional-module + `--python-flag=-m` approach
+      # builds and runs successfully. If this regresses, the job goes red.
+      - name: "Baseline: positional package + --python-flag=-m (expected to succeed)"
+        id: baseline
+        run: >
+          uv --no-progress run -- nuitka
+          --mode=onefile --assume-yes-for-downloads
+          --output-filename="cli${BIN_EXT}"
+          --python-flag=-m cli
+
+      - name: Upload diagnostic logs and crash report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: nuitka-diagnostics-${{ matrix.os }}-${{ matrix['python-source'] }}
+          if-no-files-found: ignore
+          path: |
+            bug-a.log
+            bug-b.log
+            nuitka-crash-report.xml
+
       - name: Install exiftool - Linux
         if: runner.os == 'Linux'
         run: |
@@ -72,7 +121,7 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           choco install exiftool --no-progress --yes
-      - name: Binary metadata
+      - name: Baseline binary metadata
         # Ubuntu:
         #   CPU Type      : Arm 64-bits (Armv8/AArch64)
         #   CPU Type      : AMD x86-64
@@ -83,11 +132,11 @@ jobs:
         #   Machine Type  : ARM64 little endian
         #   Machine Type  : AMD AMD64
         run: |
-          exiftool${{ runner.os == 'Windows' && '.exe' || '' }} cli${{ runner.os == 'Windows' && '.exe' || '.bin' }}
-      - name: Set binary permissions
+          exiftool${{ runner.os == 'Windows' && '.exe' || '' }} "cli${BIN_EXT}"
+      - name: Set baseline binary permissions
         if: runner.os != 'Windows'
         run: |
-          chmod +x cli.bin
-      - name: Run binary
+          chmod +x "cli${BIN_EXT}"
+      - name: Run baseline binary
         run: |
-          ${{ runner.os == 'Windows' && '.\cli.exe' || './cli.bin' }}
+          "./cli${BIN_EXT}"
