@@ -2,7 +2,7 @@
 
 .. code-block:: shell-session
 
-    $ python -m meta_package_manager
+    $ python -m cli
 """
 
 if __name__ == "__main__":
