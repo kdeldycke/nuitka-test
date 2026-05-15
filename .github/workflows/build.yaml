@@ -27,6 +27,10 @@ jobs:
           # for bug A surfaces the next missing-state failure: NuitkaCodeDeficit
           # from the first `locateModule` call (no `_main_paths` set up).
           - bug-b
+          # Bug C: factory's bug-B FATAL points users at `--project`. This
+          # variant pairs `--main-entry-point` with `--project=cli` to test
+          # whether the suggested workaround builds and runs.
+          - bug-c
           # Baseline: positional package + `--python-flag=-m` builds and runs.
           - baseline
     runs-on: ${{ matrix.os }}
@@ -77,6 +81,17 @@ jobs:
           --output-folder-name=cli-bug-b
           --main-entry-point=cli=cli.cli_code:my_cli
 
+      # Bug C: tests the workaround that factory's bug-B FATAL suggests
+      # (`--project` paired with `--main-entry-point`).
+      - name: "Bug C: --main-entry-point + --project"
+        if: matrix.variant == 'bug-c'
+        run: >
+          uv --no-progress run -- python -m nuitka
+          --mode=onefile --assume-yes-for-downloads
+          --output-filename="cli${BIN_EXT}"
+          --project=cli
+          --main-entry-point=cli=cli.cli_code:my_cli
+
       # Baseline — expected to SUCCEED. The legacy positional-package +
       # `--python-flag=-m` invocation builds a working binary.
       - name: "Baseline: positional package + --python-flag=-m"
@@ -87,12 +102,12 @@ jobs:
           --output-filename="cli${BIN_EXT}"
           --python-flag=-m cli
 
-      # Bug B emits a crash report; preserve it for inspection.
+      # Bug B and Bug C may emit a crash report; preserve it for inspection.
       - name: Upload Nuitka crash report
-        if: always() && matrix.variant == 'bug-b'
+        if: always() && (matrix.variant == 'bug-b' || matrix.variant == 'bug-c')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: nuitka-crash-report-${{ matrix.os }}
+          name: nuitka-crash-report-${{ matrix.variant }}-${{ matrix.os }}
           if-no-files-found: ignore
           path: nuitka-crash-report.xml
 
@@ -121,11 +136,11 @@ jobs:
         if: matrix.variant == 'baseline'
         run: |
           exiftool${{ runner.os == 'Windows' && '.exe' || '' }} "cli${BIN_EXT}"
-      - name: Set baseline binary permissions
-        if: matrix.variant == 'baseline' && runner.os != 'Windows'
+      - name: Set binary permissions
+        if: (matrix.variant == 'baseline' || matrix.variant == 'bug-c') && runner.os != 'Windows'
         run: |
           chmod +x "cli${BIN_EXT}"
-      - name: Run baseline binary
-        if: matrix.variant == 'baseline'
+      - name: Run binary
+        if: matrix.variant == 'baseline' || matrix.variant == 'bug-c'
         run: |
           "./cli${BIN_EXT}"
