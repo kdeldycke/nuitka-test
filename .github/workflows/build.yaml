@@ -27,9 +27,11 @@ jobs:
           # for bug A surfaces the next missing-state failure: NuitkaCodeDeficit
           # from the first `locateModule` call (no `_main_paths` set up).
           - bug-b
-          # Bug C: factory's bug-B FATAL points users at `--project`. This
-          # variant pairs `--main-entry-point` with `--project=cli` to test
-          # whether the suggested workaround builds and runs.
+          # Bug C: the maintainer's comment on #3879 names `--project-name`
+          # as the hidden option that satisfies the missing-project-name
+          # conflict introduced on factory. This variant tests whether
+          # pairing `--main-entry-point` with `--project-name=cli` produces
+          # a working binary.
           - bug-c
           # Baseline: positional package + `--python-flag=-m` builds and runs.
           - baseline
@@ -81,15 +83,16 @@ jobs:
           --output-folder-name=cli-bug-b
           --main-entry-point=cli=cli.cli_code:my_cli
 
-      # Bug C: tests the workaround that factory's bug-B FATAL suggests
-      # (`--project` paired with `--main-entry-point`).
-      - name: "Bug C: --main-entry-point + --project"
+      # Bug C: tests the hidden `--project-name` option the maintainer
+      # named in #3879 as the way to satisfy factory's new missing-project-
+      # name conflict when using `--main-entry-point`.
+      - name: "Bug C: --main-entry-point + --project-name"
         if: matrix.variant == 'bug-c'
         run: >
           uv --no-progress run -- python -m nuitka
           --mode=onefile --assume-yes-for-downloads
           --output-filename="cli${BIN_EXT}"
-          --project=cli
+          --project-name=cli
           --main-entry-point=cli=cli.cli_code:my_cli
 
       # Baseline — expected to SUCCEED. The legacy positional-package +
