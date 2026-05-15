@@ -45,7 +45,7 @@ jobs:
           uv --no-progress venv --python 3.13.13
       - name: Install Nuitka
         run: |
-          uv --no-progress pip install "Nuitka[onefile]==4.1" "uv_build==0.11.13"
+          uv --no-progress pip install "Nuitka[onefile] @ git+https://github.com/Nuitka/Nuitka.git@factory" "uv_build==0.11.13"
       - name: nuitka --version
         run: |
           uv --no-progress run -- python -m nuitka --version
