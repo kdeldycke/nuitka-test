@@ -33,6 +33,8 @@ jobs:
           # pairing `--main-entry-point` with `--project-name=cli` produces
           # a working binary.
           - bug-c
+          # Bug D: tests bare `--project` (no value).
+          - bug-d
           # Baseline: positional package + `--python-flag=-m` builds and runs.
           - baseline
     runs-on: ${{ matrix.os }}
@@ -95,6 +97,16 @@ jobs:
           --project-name=cli
           --main-entry-point=cli=cli.cli_code:my_cli
 
+      # Bug D: tests bare `--project` (no value).
+      - name: "Bug D: --main-entry-point + --project"
+        if: matrix.variant == 'bug-d'
+        run: >
+          uv --no-progress run -- python -m nuitka
+          --mode=onefile --assume-yes-for-downloads
+          --output-filename="cli${BIN_EXT}"
+          --project
+          --main-entry-point=cli=cli.cli_code:my_cli
+
       # Baseline — expected to SUCCEED. The legacy positional-package +
       # `--python-flag=-m` invocation builds a working binary.
       - name: "Baseline: positional package + --python-flag=-m"
@@ -105,9 +117,10 @@ jobs:
           --output-filename="cli${BIN_EXT}"
           --python-flag=-m cli
 
-      # Bug B and Bug C may emit a crash report; preserve it for inspection.
+      # Bug B, Bug C, and Bug D may emit a crash report; preserve it for
+      # inspection.
       - name: Upload Nuitka crash report
-        if: always() && (matrix.variant == 'bug-b' || matrix.variant == 'bug-c')
+        if: always() && (matrix.variant == 'bug-b' || matrix.variant == 'bug-c' || matrix.variant == 'bug-d')
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: nuitka-crash-report-${{ matrix.variant }}-${{ matrix.os }}
