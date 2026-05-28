@@ -1,0 +1,35 @@
+---
+"on":
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Reproduce XXX
+
+jobs:
+
+  tool-nuitka-ignored:
+    name: "[tool.nuitka] ignored by nuitka --project (uv_build)"
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          version: "0.11.13"
+      - name: Setup venv
+        run: |
+          uv --no-progress venv --python 3.13
+      - name: Install Nuitka (factory branch) and uv_build
+        run: |
+          uv --no-progress pip install "Nuitka[onefile] @ git+https://github.com/Nuitka/Nuitka.git@factory" "uv_build==0.11.13"
+      - name: nuitka --version
+        run: |
+          uv --no-progress run -- python -m nuitka --version
+
+      - name: Nuitka --project ignore [tool.nuitka]
+        run: |
+          uv --no-progress run -- python -m nuitka --project

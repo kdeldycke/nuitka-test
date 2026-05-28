@@ -14,3 +14,7 @@ cli = "cli.cli_code:my_cli"
 [tool.uv]
 # Package is at root level, not in "./src/".
 build-backend.module-root = ""
+
+[tool.nuitka]
+mode = "standalone"
+output-dir = "from-pyproject-toml"
