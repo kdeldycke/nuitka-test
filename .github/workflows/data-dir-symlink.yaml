@@ -5,8 +5,9 @@
       - main
   workflow_dispatch:
 
-# Reproduce the `--include-data-dir` dangling-symlink bug written up in
-# ./data-dir-symlink-bug-report.md at the repository root.
+# Reproduce https://github.com/Nuitka/Nuitka/issues/3994
+#
+# Full write-up in ./data-dir-symlink-bug-report.md at the repository root.
 #
 # A symlink inside the `--include-data-dir` source, pointing at a sibling tree
 # that no inclusion flag covers, is copied into the distribution as a symlink
@@ -119,6 +120,10 @@ jobs:
           print(f"  present:  {note.exists() or note.is_symlink()}")
           print(f"  symlink:  {note.is_symlink()}")
           print(f"  readable: {note.exists()}")
+
+          # sys.exit writes to stderr, which the Actions log interleaves ahead
+          # of buffered stdout unless it is flushed first.
+          sys.stdout.flush()
 
           # An absent data file is a failure too: it would otherwise make this
           # check pass for the wrong reason.
