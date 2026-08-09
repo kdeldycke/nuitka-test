@@ -1,0 +1,138 @@
+---
+"on":
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Reproduce the `--include-data-dir` dangling-symlink bug written up in
+# ./data-dir-symlink-bug-report.md at the repository root.
+#
+# A symlink inside the `--include-data-dir` source, pointing at a sibling tree
+# that no inclusion flag covers, is copied into the distribution as a symlink
+# instead of as its content. Nothing ever creates the target, so the link
+# dangles. On macOS the signing pass then stats every distribution file and
+# dies with `FileNotFoundError`; on Linux the build reports success and ships
+# the broken link.
+#
+# Windows is left out on purpose. `copyFileWithPermissions` in
+# `nuitka/utils/FileOperations.py` short-circuits its symlink branch on
+# `isWin32Windows()`, so Windows always dereferences and never reaches the code
+# path under test. Git Bash's `ln -s` also copies instead of linking unless
+# `MSYS=winsymlinks:nativestrict` is set, so the job would not even build the
+# right input tree.
+
+jobs:
+
+  data-dir-symlink:
+    name: ${{ matrix.nuitka.label }} / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04-arm  # arm64
+          - ubuntu-24.04      # x86
+          - macos-26          # arm64
+          - macos-26-intel    # x86
+        nuitka:
+          # Released version the bug report was written against.
+          - label: "4.1.3"
+            spec: "nuitka==4.1.3"
+          # Bleeding-edge branch, to show the behaviour is not already fixed
+          # upstream.
+          - label: "factory"
+            spec: "Nuitka @ git+https://github.com/Nuitka/Nuitka.git@factory"
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          version: "0.11.13"
+      - name: Setup venv
+        run: |
+          uv --no-progress venv --python 3.14
+      - name: Install Nuitka
+        run: |
+          uv --no-progress pip install "${{ matrix.nuitka.spec }}"
+      - name: nuitka --version
+        run: |
+          uv --no-progress run -- python -m nuitka --version
+
+      # The whole reproducer: a hello-world package whose data directory holds
+      # a symlink pointing at a sibling tree that is not included anywhere on
+      # the command line. No repository checkout is needed.
+      - name: Create the reproducer tree
+        run: |
+          mkdir -p canonical myapp/data
+          echo "some content" > canonical/NOTE.md
+          printf 'print("hello world")\n' > myapp/__main__.py
+          touch myapp/__init__.py
+          ln -s ../../canonical/NOTE.md myapp/data/NOTE.md
+      - name: Show the source symlink
+        run: |
+          ls -l myapp/data/NOTE.md
+          readlink myapp/data/NOTE.md
+          test -e myapp/data/NOTE.md \
+            && echo "source link resolves, as it should" \
+            || echo "source link is already broken, reproducer is invalid"
+
+      # Expected to FAIL on macOS with:
+      #   FileNotFoundError: [Errno 2] No such file or directory:
+      #   'myapp.dist/myapp/data/NOTE.md'
+      # raised by signDistributionMacOS -> withMadeWritableFileMode -> os.stat.
+      # Expected to SUCCEED on Linux, which never signs, leaving the dangling
+      # link in the distribution unreported.
+      - name: Build
+        run: >
+          uv --no-progress run -- python -m nuitka
+          --mode=standalone --assume-yes-for-downloads
+          --include-data-dir=myapp/data=myapp/data
+          myapp
+
+      # Runs even when the build crashed: data files are copied before the
+      # signing pass, so the preserved link is in the tree either way. This is
+      # what turns the silent Linux case into a visible failure.
+      - name: Check the distribution is self-contained
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import os
+          import sys
+          from pathlib import Path
+
+          dist = Path("myapp.dist")
+          if not dist.is_dir():
+              sys.exit("No myapp.dist directory: the build died before populating it.")
+
+          dangling = []
+          for path in sorted(dist.rglob("*")):
+              if path.is_symlink():
+                  state = "resolves" if path.exists() else "DANGLING"
+                  print(f"{state}  {path} -> {os.readlink(path)}")
+                  if not path.exists():
+                      dangling.append(path)
+
+          note = dist / "myapp" / "data" / "NOTE.md"
+          print(f"\n{note}")
+          print(f"  present:  {note.exists() or note.is_symlink()}")
+          print(f"  symlink:  {note.is_symlink()}")
+          print(f"  readable: {note.exists()}")
+
+          # An absent data file is a failure too: it would otherwise make this
+          # check pass for the wrong reason.
+          if not (note.exists() or note.is_symlink()):
+              sys.exit("\nThe data file never made it into the distribution at all.")
+          if dangling:
+              sys.exit(f"\n{len(dangling)} dangling symlink(s) shipped in the distribution.")
+          print("\nDistribution is self-contained.")
+          PY
+
+      - name: Upload Nuitka crash report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: nuitka-crash-report-${{ matrix.nuitka.label }}-${{ matrix.os }}
+          if-no-files-found: ignore
+          path: nuitka-crash-report.xml
