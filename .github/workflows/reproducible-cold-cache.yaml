@@ -48,9 +48,9 @@ jobs:
         run: |
           printf 'print("hello world")\n' > hello.py
 
-      # Every round runs in the same directory with the same flags, so no path
+      # Every build runs in the same directory with the same flags, so no path
       # difference can enter the comparison: the build tree is wiped between
-      # rounds, not relocated. Round 0 additionally starts from a deleted
+      # builds, not relocated. Build #0 additionally starts from a deleted
       # Nuitka cache, which is the cold-cache case under question.
       - name: Build repeatedly and compare
         env:
@@ -74,23 +74,23 @@ jobs:
           ]
           # Standalone mode names the binary hello.bin off Windows, hello.exe on it.
           BINARIES = ("hello.bin", "hello.exe", "hello")
-          ROUNDS = 3
+          BUILDS = 3
 
 
-          def build(round_number):
-              if round_number == 0:
+          def build(number):
+              if number == 0:
                   shutil.rmtree(os.environ["NUITKA_CACHE_DIR"], ignore_errors=True)
               for leftover in ("hello.build", "hello.dist"):
                   shutil.rmtree(leftover, ignore_errors=True)
 
-              print(f"::group::build {round_number}")
+              print(f"::group::build #{number}")
               sys.stdout.flush()
               subprocess.run(NUITKA + FLAGS, check=True)
               print("::endgroup::")
 
-              # Kept per round so a varying object can be read against the
+              # Kept per build so a varying object can be read against the
               # source it was compiled from.
-              shutil.copytree("hello.build", f"round-{round_number}")
+              shutil.copytree("hello.build", f"build-{number}")
 
               binaries = [Path("hello.dist") / name for name in BINARIES]
               artifacts = sorted(Path("hello.build").rglob("*.o"))
@@ -101,7 +101,7 @@ jobs:
               }
 
 
-          rounds = [build(round_number) for round_number in range(ROUNDS)]
+          builds = [build(number) for number in range(BUILDS)]
 
           # ccache folds the current date into the hash of any source using a
           # time macro unless sloppiness=time_macros says otherwise, and it
@@ -120,10 +120,10 @@ jobs:
           for source in users[:20]:
               print(f"  {source}")
 
-          print(f"\nartifact digests over {ROUNDS} rounds (round 0 = cold Nuitka cache)")
+          print(f"\nartifact digests over {BUILDS} builds (build #0 = cold Nuitka cache)")
           varying = []
-          for name in sorted(rounds[0]):
-              values = [manifest.get(name, "absent")[:12] for manifest in rounds]
+          for name in sorted(builds[0]):
+              values = [manifest.get(name, "absent")[:12] for manifest in builds]
               stable = len(set(values)) == 1
               if not stable:
                   varying.append(name)
@@ -134,11 +134,11 @@ jobs:
           for name in varying:
               if not name.endswith(".o"):
                   continue
-              sources = [Path(f"round-{index}") / f"{name[:-2]}.c" for index in range(ROUNDS)]
+              sources = [Path(f"build-{index}") / f"{name[:-2]}.c" for index in range(BUILDS)]
               if not all(source.exists() for source in sources):
                   continue
               seen = {hashlib.sha256(source.read_bytes()).hexdigest() for source in sources}
-              print(f"  {name[:-2]}.c was {'stable' if len(seen) == 1 else 'different'} across rounds")
+              print(f"  {name[:-2]}.c was {'stable' if len(seen) == 1 else 'different'} across builds")
 
           sys.stdout.flush()
           objects = [name for name in varying if name.endswith(".o")]
@@ -149,13 +149,13 @@ jobs:
           print("\nIdentical: every object file and the final binary match byte for byte.")
           PY
 
-      - name: Upload the per-round build trees
+      - name: Upload the build trees
         if: failure()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: rounds-${{ matrix.nuitka.label }}-${{ matrix.os }}
+          name: builds-${{ matrix.nuitka.label }}-${{ matrix.os }}
           if-no-files-found: ignore
-          path: round-*
+          path: build-*
 
   sloppiness-override:
     name: user CCACHE_SLOPPINESS is overwritten / ${{ matrix.nuitka.label }}
