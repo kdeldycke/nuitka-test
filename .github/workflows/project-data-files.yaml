@@ -76,11 +76,16 @@ jobs:
           {nuitka}
           """
 
+          # `product-version` rides along with `product-name` because Windows
+          # refuses version information without a version. Neither key has any
+          # bearing on the data-file check under test.
+          PLAIN = 'product-name = "Mypkg"\nproduct-version = "1.0.0"'
+
           CASES = {
               # Nothing unusual declared: proves `--project` builds this project.
-              "control": {"deps": "", "nuitka": 'product-name = "Mypkg"', "py_typed": False},
+              "control": {"deps": "", "nuitka": PLAIN, "py_typed": False},
               # A PEP 561 marker, which the wheel ships and no [tool.nuitka] rule names.
-              "py-typed": {"deps": "", "nuitka": 'product-name = "Mypkg"', "py_typed": True},
+              "py-typed": {"deps": "", "nuitka": PLAIN, "py_typed": True},
               # A dependency's package data, which is what the option exists for.
               "dep-data": {"deps": '"certifi"', "nuitka": 'include-package-data = [ "certifi" ]',
                            "py_typed": False},
