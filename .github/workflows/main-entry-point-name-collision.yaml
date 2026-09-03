@@ -1,0 +1,152 @@
+---
+"on":
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Reproduce the `--main-entry-point` launcher name collision.
+# The upstream issue link goes here once the report is filed.
+#
+# Nuitka names the module it generates for an entry point after that entry
+# point's CLI id. When the id matches the package the entry point imports
+# from, the generated module shadows the package: the build succeeds and the
+# binary dies on its first import.
+#
+# Naming a console script after its package is the ordinary convention, so
+# this hits a normal project. The variable is the name, not the layout: the
+# same package builds and runs whenever the id differs, and the collision
+# needs the package to come from the environment rather than the build
+# directory, which is what an installed distribution does.
+
+jobs:
+
+  name-collision:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04      # x86
+          - macos-26          # arm64
+          - windows-2025      # x86
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          version: "0.11.13"
+
+      - name: Build the same package under two entry-point names
+        run: |
+          python3 - <<'PY'
+          import os
+          import shutil
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          def fail(message):
+              """Report a verdict on stdout, so it lands after the evidence it refers to.
+
+              `sys.exit(message)` writes to stderr, which the Actions log interleaves
+              ahead of buffered stdout, putting the conclusion before its own reasons.
+              """
+              print(message)
+              sys.stdout.flush()
+              sys.exit(1)
+
+          root = Path.cwd()
+          windows = sys.platform == "win32"
+          venv = root / "venv"
+          python = venv / ("Scripts" if windows else "bin") / ("python.exe" if windows else "python")
+
+          # An ordinary distribution: one package, one console script named
+          # after it, exactly as `[project.scripts]` is usually written.
+          pkg = root / "proj" / "src" / "mypkg"
+          pkg.mkdir(parents=True)
+          (pkg / "__init__.py").write_text("", encoding="UTF-8")
+          (pkg / "__main__.py").write_text(
+              'def main():\n    print("hello from mypkg")\n\n\n'
+              'if __name__ == "__main__":\n    main()\n',
+              encoding="UTF-8",
+          )
+          (root / "proj" / "pyproject.toml").write_text(
+              '[build-system]\nbuild-backend = "uv_build"\nrequires = [ "uv-build>=0.9" ]\n\n'
+              '[project]\nname = "mypkg"\nversion = "1.0.0"\nrequires-python = ">=3.11"\n\n'
+              '[project.scripts]\nmypkg = "mypkg.__main__:main"\n',
+              encoding="UTF-8",
+          )
+
+          subprocess.run(["uv", "--no-progress", "venv", "--python", "3.13", str(venv)], check=True)
+          # Install it, so the package resolves from the environment. Nothing
+          # below builds from a directory holding a copy of the sources.
+          subprocess.run(
+              ["uv", "--no-progress", "pip", "install", "--python", str(python),
+               "nuitka==4.2", str(root / "proj")],
+              check=True,
+          )
+
+          def build(cli_id):
+              out = root / f"build-{cli_id}"
+              shutil.rmtree(out, ignore_errors=True)
+              out.mkdir()
+              print(f"::group::--main-entry-point={cli_id}=mypkg.__main__:main")
+              sys.stdout.flush()
+              proc = subprocess.run(
+                  [str(python), "-m", "nuitka", "--mode=standalone", "--assume-yes-for-downloads",
+                   "--project-name=mypkg", "--include-package=mypkg",
+                   f"--main-entry-point={cli_id}=mypkg.__main__:main"],
+                  cwd=out, capture_output=True, text=True, encoding="UTF-8",
+              )
+              print(proc.stdout[-2000:])
+              print(proc.stderr[-2000:], file=sys.stderr)
+              print("::endgroup::")
+              sys.stdout.flush()
+
+              result = {"build": proc.returncode, "run": None, "stdout": "", "stderr": ""}
+              dists = list(out.glob("*.dist"))
+              binaries = []
+              if dists:
+                  binaries = [
+                      path for path in dists[0].iterdir()
+                      if path.is_file() and path.suffix in {"", ".exe", ".bin"}
+                      and path.stem in {cli_id, "mypkg"}
+                  ]
+              if binaries:
+                  run = subprocess.run([str(binaries[0])], capture_output=True, text=True,
+                                       encoding="UTF-8", timeout=180)
+                  result.update({"run": run.returncode, "stdout": run.stdout.strip(),
+                                 "stderr": run.stderr.strip(), "binary": binaries[0].name})
+              print(f"cli id {cli_id!r}: build={result['build']} run={result['run']} "
+                    f"stdout={result['stdout']!r}")
+              if result["run"]:
+                  print(f"  {result['stderr'][-400:]}")
+              sys.stdout.flush()
+              return result
+
+          # Control first: the identical package under a name that cannot collide.
+          control = build("mycli")
+          # The ordinary case: the console script carries the package's name.
+          collision = build("mypkg")
+
+          print("\n" + "=" * 70)
+          if control["build"] or control["run"]:
+              fail("\nThe control failed too, so nothing here is attributable to the name.")
+
+          if collision["build"]:
+              fail(f"\nThe colliding build failed to compile ({collision['build']}), "
+                   "which is not the reported behaviour.")
+
+          if collision["run"] == 0:
+              print("\nBoth names produce a working binary.")
+          else:
+              fail(
+                  "\nSame package, same entry point, two names:\n"
+                  f"  cli id 'mycli': binary prints {control['stdout']!r}\n"
+                  f"  cli id 'mypkg': binary exits {collision['run']} with nothing on stdout\n"
+                  "The build reports success in both cases."
+              )
+          PY
