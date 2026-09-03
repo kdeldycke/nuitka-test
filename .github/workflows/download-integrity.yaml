@@ -50,7 +50,6 @@ jobs:
         run: |
           uv --no-progress run -- python - <<'PY'
           import inspect
-          import re
           from pathlib import Path
 
           from nuitka.utils import Download
@@ -93,13 +92,22 @@ jobs:
           python3 - <<'PY'
           import hashlib
           import os
-          import re
           import sys
           from pathlib import Path
 
+          def fail(message):
+              """Report a verdict on stdout, so it lands after the evidence it refers to.
+
+              `sys.exit(message)` writes to stderr, which the Actions log interleaves
+              ahead of buffered stdout, putting the conclusion before its own reasons.
+              """
+              print(message)
+              sys.stdout.flush()
+              sys.exit(1)
+
           log = Path("build.log")
           if not log.is_file():
-              sys.exit("No build log: the build never ran, so the test is void.")
+              fail("No build log: the build never ran, so the test is void.")
 
           lines = log.read_text(encoding="UTF-8", errors="replace").splitlines()
           fetched = [line.strip() for line in lines if "Downloading" in line or "Extracting" in line]
@@ -110,7 +118,7 @@ jobs:
               print(f"  {line}")
 
           if not fetched:
-              sys.exit("\nNothing was downloaded, so this run proves nothing. A cached tool was reused.")
+              fail("\nNothing was downloaded, so this run proves nothing. A cached tool was reused.")
 
           downloads = Path(os.environ["NUITKA_CACHE_DIR"]) / "downloads"
           archives, sidecars = [], []
@@ -136,7 +144,7 @@ jobs:
           if sidecars:
               print("\nA verification artifact is present.")
           else:
-              sys.exit(
+              fail(
                   f"\n{len(archives)} executable archive(s) were fetched over TLS and run inside the "
                   "build, with no digest recorded or compared at any point."
               )

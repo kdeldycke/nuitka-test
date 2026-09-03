@@ -47,19 +47,36 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
         with:
           version: "0.11.13"
+      # Nuitka downloads ccache on macOS and Windows. On Linux it expects the
+      # OS package, and the runner image ships without one, which leaves the
+      # job with nothing to measure.
+      - name: Install ccache - Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get --quiet update
+          sudo apt-get --quiet --yes --no-install-recommends install ccache
       - name: Create the reproducer
         run: |
           printf 'print("hello world")\n' > hello.py
       - name: Build three times and compare ccache keys
         run: |
           python3 - <<'PY'
-          import json
           import os
           import re
           import shutil
           import subprocess
           import sys
           from pathlib import Path
+
+          def fail(message):
+              """Report a verdict on stdout, so it lands after the evidence it refers to.
+
+              `sys.exit(message)` writes to stderr, which the Actions log interleaves
+              ahead of buffered stdout, putting the conclusion before its own reasons.
+              """
+              print(message)
+              sys.stdout.flush()
+              sys.exit(1)
 
           NUITKA = "nuitka==4.2"
           RESULT = re.compile(r"result '(cache hit|cache miss)': (\d+)")
@@ -89,7 +106,7 @@ jobs:
               print(proc.stderr, file=sys.stderr)
               print("::endgroup::")
               if proc.returncode != 0:
-                  sys.exit(f"build #{number} failed")
+                  fail(f"build #{number} failed")
 
               # Nuitka reports the ccache tally on stderr, not stdout.
               counts = {kind: int(value) for kind, value in RESULT.findall(proc.stdout + proc.stderr)}
@@ -126,16 +143,16 @@ jobs:
           sys.stdout.flush()
 
           if not moved:
-              sys.exit("\nThe second uv cache reused the first extraction, so nothing was tested.")
+              fail("\nThe second uv cache reused the first extraction, so nothing was tested.")
           if second["hits"] == 0:
-              sys.exit("\nThe control build missed too: ccache is not working here, so the test is void.")
+              fail("\nThe control build missed too: ccache is not working here, so the test is void.")
 
           print(f"\ncontrol build 2 (same path):  {second['hits']} hit(s), {second['misses']} miss(es)")
           print(f"build 3 (path moved):         {third['hits']} hit(s), {third['misses']} miss(es)")
           sys.stdout.flush()
 
           if third["hits"] == 0:
-              sys.exit(
+              fail(
                   f"\nEvery one of the {third['misses']} file(s) missed after the install path moved, "
                   f"while the identical build 2 scored {second['hits']} hit(s)."
               )
@@ -209,6 +226,16 @@ jobs:
           import sys
           from pathlib import Path
 
+          def fail(message):
+              """Report a verdict on stdout, so it lands after the evidence it refers to.
+
+              `sys.exit(message)` writes to stderr, which the Actions log interleaves
+              ahead of buffered stdout, putting the conclusion before its own reasons.
+              """
+              print(message)
+              sys.stdout.flush()
+              sys.exit(1)
+
           log = Path("build.log").read_text(encoding="UTF-8", errors="replace")
           counts = {kind: int(value) for kind, value in re.findall(r"result '(cache hit|cache miss)': (\d+)", log)}
           hits = counts.get("cache hit", 0)
@@ -217,6 +244,6 @@ jobs:
           sys.stdout.flush()
 
           if hits == 0:
-              sys.exit(f"\nEvery one of the {misses} file(s) missed on a second runner sharing the same ccache.")
+              fail(f"\nEvery one of the {misses} file(s) missed on a second runner sharing the same ccache.")
           print("\nThe second runner reused the cache.")
           PY
