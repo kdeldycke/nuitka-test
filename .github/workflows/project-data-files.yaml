@@ -5,8 +5,7 @@
       - main
   workflow_dispatch:
 
-# Reproduce the `--project` data-file consistency check.
-# The upstream issue link goes here once the report is filed.
+# Reproduce https://github.com/Nuitka/Nuitka/issues/4025
 #
 # `--project` compares the data files the project configuration implies against
 # the ones the build included, and aborts when they differ. Two ordinary
