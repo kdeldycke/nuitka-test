@@ -1,0 +1,143 @@
+---
+"on":
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Reproduce https://github.com/Nuitka/Nuitka/issues/3997
+#
+# This one has no failing build to capture: every compilation succeeds, and
+# that is the finding. What the job shows instead is that no verification step
+# exists anywhere between fetching an executable and running it as part of the
+# build. It reads the installed release rather than a copy of the source, so
+# the result tracks whatever version the pin names.
+#
+# The job stays red while the control is missing, like the other reproducers
+# here. It turns green on its own the day a digest is checked.
+#
+# macOS is the platform under test because that is where a stock runner has no
+# ccache on PATH, so a plain build fetches one. The same helper serves the
+# winlibs gcc, depends.exe, appimagetool and NSIS downloads on other systems.
+
+jobs:
+
+  download-integrity:
+    name: downloaded tools are never verified
+    runs-on: macos-26
+    defaults:
+      run:
+        shell: bash
+    env:
+      NUITKA_CACHE_DIR: ${{ github.workspace }}/nuitka-cache
+    steps:
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          version: "0.11.13"
+      - name: Setup venv
+        run: |
+          uv --no-progress venv --python 3.14
+      - name: Install Nuitka
+        run: |
+          uv --no-progress pip install "nuitka==4.2"
+      - name: nuitka --version
+        run: |
+          uv --no-progress run -- python -m nuitka --version
+
+      # Read the signature off the installed module rather than grepping a
+      # source copy: a renamed helper or a reordered file cannot fake this.
+      - name: Inspect the download helper
+        run: |
+          uv --no-progress run -- python - <<'PY'
+          import inspect
+          import re
+          from pathlib import Path
+
+          from nuitka.utils import Download
+
+          signature = inspect.signature(Download.getCachedDownload)
+          print("getCachedDownload parameters:")
+          for name in signature.parameters:
+              print(f"  {name}")
+
+          source = Path(Download.__file__)
+          print(f"\n{source}")
+          tokens = ("sha256", "sha1", "md5", "hashlib", "checksum", "digest", "signature", "gpg", "sigstore")
+          hits = [
+              f"{number}: {line.strip()}"
+              for number, line in enumerate(source.read_text(encoding="UTF-8").splitlines(), 1)
+              if any(token in line.lower() for token in tokens)
+          ]
+          print(f"lines mentioning an integrity primitive: {len(hits)}")
+          for hit in hits:
+              print(f"  {hit}")
+          PY
+
+      - name: Confirm no ccache is present, so the build has to fetch one
+        run: |
+          command -v ccache && echo "ccache already on PATH" || echo "no ccache on PATH"
+
+      - name: Create the reproducer
+        run: |
+          printf 'print("hello world")\n' > hello.py
+      - name: Build
+        run: |
+          uv --no-progress run -- python -m nuitka \
+            --mode=standalone --assume-yes-for-downloads hello.py 2>&1 | tee build.log
+
+      # Everything above is what Nuitka did. This step is what Nuitka did not
+      # do: compute a digest and compare it against a known value.
+      - name: Check what was fetched and what verified it
+        if: always()
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          log = Path("build.log")
+          if not log.is_file():
+              sys.exit("No build log: the build never ran, so the test is void.")
+
+          lines = log.read_text(encoding="UTF-8", errors="replace").splitlines()
+          fetched = [line.strip() for line in lines if "Downloading" in line or "Extracting" in line]
+          used = [line.strip() for line in lines if "using ccache" in line]
+
+          print("what the build reported:")
+          for line in fetched + used:
+              print(f"  {line}")
+
+          if not fetched:
+              sys.exit("\nNothing was downloaded, so this run proves nothing. A cached tool was reused.")
+
+          downloads = Path(os.environ["NUITKA_CACHE_DIR"]) / "downloads"
+          archives, sidecars = [], []
+          for path in sorted(downloads.rglob("*")):
+              if not path.is_file():
+                  continue
+              relative = path.relative_to(downloads)
+              if path.suffix.lower() in {".zip", ".gz", ".xz", ".exe", ".7z"}:
+                  archives.append(path)
+              if path.suffix.lower() in {".sha256", ".sha1", ".md5", ".asc", ".sig", ".sigstore"}:
+                  sidecars.append(relative)
+
+          print(f"\n{downloads}")
+          for archive in archives:
+              digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+              print(f"  {archive.relative_to(downloads)}")
+              print(f"    sha256 {digest}   computed by this job, compared by nothing")
+          print(f"  checksum or signature files alongside them: {len(sidecars)}")
+          for sidecar in sidecars:
+              print(f"    {sidecar}")
+
+          sys.stdout.flush()
+          if sidecars:
+              print("\nA verification artifact is present.")
+          else:
+              sys.exit(
+                  f"\n{len(archives)} executable archive(s) were fetched over TLS and run inside the "
+                  "build, with no digest recorded or compared at any point."
+              )
+          PY
