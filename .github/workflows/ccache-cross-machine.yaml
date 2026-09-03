@@ -1,0 +1,222 @@
+---
+"on":
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Reproduce https://github.com/Nuitka/Nuitka/issues/3996
+#
+# Nuitka derives its `-I` flags from wherever it is installed. An ephemeral uv
+# environment resolves that location to `{uv cache}/archive-v0/{random}/`, and
+# the random segment changes on every extraction. The compiler command line
+# changes with it, so ccache computes a different key and never matches an
+# entry an earlier extraction wrote.
+#
+# The install form is what decides whether the bug appears. `uv venv` plus
+# `uv pip install` copies Nuitka into the virtual environment, whose path is
+# stable across runs, and never reproduces this. Both jobs below install the
+# way the report did, through an ephemeral environment, so Nuitka is imported
+# straight out of the uv cache.
+#
+# `path-change` isolates the variable on one machine. `cross-machine` is the
+# case the issue title names: two runners sharing one ccache directory.
+
+jobs:
+
+  # Three builds, one ccache, one machine. Build 2 repeats build 1 with the
+  # same uv cache and is the control: it proves ccache works at all here. Only
+  # build 3 changes the install path, so it is the only candidate explanation
+  # left when it misses.
+  path-change:
+    name: same machine, new uv extraction / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-26          # arm64, the platform of the report
+          - ubuntu-24.04      # x86, control: the mechanism is not macOS-specific
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/shared-ccache
+      NUITKA_CACHE_DIR: ${{ github.workspace }}/nuitka-cache
+    steps:
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          version: "0.11.13"
+      - name: Create the reproducer
+        run: |
+          printf 'print("hello world")\n' > hello.py
+      - name: Build three times and compare ccache keys
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import shutil
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          NUITKA = "nuitka==4.2"
+          RESULT = re.compile(r"result '(cache hit|cache miss)': (\d+)")
+
+          def run(argv, uv_cache):
+              env = dict(os.environ)
+              env["UV_CACHE_DIR"] = str(uv_cache)
+              return subprocess.run(
+                  ["uv", "--no-progress", "run", "--no-project", "--python", "3.13", "--with", NUITKA, "--"] + argv,
+                  env=env, capture_output=True, text=True, encoding="UTF-8",
+              )
+
+          def build(number, uv_cache):
+              where = run(["python", "-c", "import nuitka; print(nuitka.__file__)"], uv_cache)
+              location = where.stdout.strip()
+
+              for leftover in ("hello.build", "hello.dist"):
+                  shutil.rmtree(leftover, ignore_errors=True)
+
+              print(f"::group::build #{number} from {location}")
+              sys.stdout.flush()
+              proc = run(
+                  ["python", "-m", "nuitka", "--mode=standalone", "--assume-yes-for-downloads", "hello.py"],
+                  uv_cache,
+              )
+              print(proc.stdout)
+              print(proc.stderr, file=sys.stderr)
+              print("::endgroup::")
+              if proc.returncode != 0:
+                  sys.exit(f"build #{number} failed")
+
+              # Nuitka reports the ccache tally on stderr, not stdout.
+              counts = {kind: int(value) for kind, value in RESULT.findall(proc.stdout + proc.stderr)}
+
+              # The ccache log records the command line ccache actually hashed,
+              # so an include path that moved is visible in it.
+              includes = set()
+              for log in Path("hello.build").glob("ccache-*.txt"):
+                  for line in log.read_text(encoding="UTF-8", errors="replace").splitlines():
+                      includes.update(re.findall(r"-I(\S*site-packages/nuitka\S*)", line))
+
+              hits = counts.get("cache hit", 0)
+              misses = counts.get("cache miss", 0)
+              print(f"build #{number}: {hits} hit(s), {misses} miss(es)")
+              print(f"  nuitka imported from: {location}")
+              for include in sorted(includes)[:3]:
+                  print(f"  -I{include}")
+              sys.stdout.flush()
+              return {"location": location, "hits": hits, "misses": misses, "includes": sorted(includes)}
+
+          workspace = Path(os.environ["GITHUB_WORKSPACE"])
+          cache_a = workspace / "uv-cache-a"
+          cache_b = workspace / "uv-cache-b"
+
+          first = build(1, cache_a)                 # Cold ccache: every file misses.
+          second = build(2, cache_a)                # Same install path: the control.
+          third = build(3, cache_b)                 # New extraction, nothing else changed.
+
+          print("\n" + "=" * 70)
+          same_path = first["location"] == second["location"]
+          moved = second["location"] != third["location"]
+          print(f"build 1 and 2 share an install path: {same_path}")
+          print(f"build 3 was extracted elsewhere:     {moved}")
+          sys.stdout.flush()
+
+          if not moved:
+              sys.exit("\nThe second uv cache reused the first extraction, so nothing was tested.")
+          if second["hits"] == 0:
+              sys.exit("\nThe control build missed too: ccache is not working here, so the test is void.")
+
+          print(f"\ncontrol build 2 (same path):  {second['hits']} hit(s), {second['misses']} miss(es)")
+          print(f"build 3 (path moved):         {third['hits']} hit(s), {third['misses']} miss(es)")
+          sys.stdout.flush()
+
+          if third["hits"] == 0:
+              sys.exit(
+                  f"\nEvery one of the {third['misses']} file(s) missed after the install path moved, "
+                  f"while the identical build 2 scored {second['hits']} hit(s)."
+              )
+          print("\nThe moved install path still hit the cache.")
+          PY
+
+  # The case the issue title names. One runner writes the cache, a second
+  # runner reads it, and the two never share a uv extraction.
+  cross-machine-seed:
+    name: cross-machine, runner 1 writes the cache
+    runs-on: macos-26
+    defaults:
+      run:
+        shell: bash
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/shared-ccache
+    steps:
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          version: "0.11.13"
+      - name: Create the reproducer
+        run: |
+          printf 'print("hello world")\n' > hello.py
+      - name: Build
+        run: >
+          uv --no-progress run --no-project --python 3.13 --with "nuitka==4.2" --
+          python -m nuitka --mode=standalone --assume-yes-for-downloads hello.py
+      - name: Report where Nuitka was imported from
+        run: >
+          uv --no-progress run --no-project --python 3.13 --with "nuitka==4.2" --
+          python -c "import nuitka; print(nuitka.__file__)"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: shared-ccache
+          path: shared-ccache
+          include-hidden-files: true
+          retention-days: 1
+
+  cross-machine-reuse:
+    name: cross-machine, runner 2 reads the cache
+    needs: cross-machine-seed
+    runs-on: macos-26
+    defaults:
+      run:
+        shell: bash
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/shared-ccache
+    steps:
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          version: "0.11.13"
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
+        with:
+          name: shared-ccache
+          path: shared-ccache
+      - name: Create the reproducer
+        run: |
+          printf 'print("hello world")\n' > hello.py
+      - name: Report where Nuitka was imported from
+        run: >
+          uv --no-progress run --no-project --python 3.13 --with "nuitka==4.2" --
+          python -c "import nuitka; print(nuitka.__file__)"
+      - name: Build against the other runner's cache
+        run: |
+          uv --no-progress run --no-project --python 3.13 --with "nuitka==4.2" -- \
+            python -m nuitka --mode=standalone --assume-yes-for-downloads hello.py 2>&1 | tee build.log
+      - name: Check the cache was reused
+        run: |
+          python3 - <<'PY'
+          import re
+          import sys
+          from pathlib import Path
+
+          log = Path("build.log").read_text(encoding="UTF-8", errors="replace")
+          counts = {kind: int(value) for kind, value in re.findall(r"result '(cache hit|cache miss)': (\d+)", log)}
+          hits = counts.get("cache hit", 0)
+          misses = counts.get("cache miss", 0)
+          print(f"{hits} hit(s), {misses} miss(es) against the cache the first runner wrote")
+          sys.stdout.flush()
+
+          if hits == 0:
+              sys.exit(f"\nEvery one of the {misses} file(s) missed on a second runner sharing the same ccache.")
+          print("\nThe second runner reused the cache.")
+          PY
