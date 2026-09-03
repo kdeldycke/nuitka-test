@@ -6,11 +6,15 @@
   workflow_dispatch:
 
 # Reproduce https://github.com/Nuitka/Nuitka/issues/3909
+#
+# Nuitka 4.2 reads the section, so this job now passes. It is kept as the
+# evidence for that: the build only lands in from-pyproject-toml/ if the
+# `[tool.nuitka]` keys were applied.
 
 jobs:
 
   tool-nuitka-ignored:
-    name: "[tool.nuitka] ignored by nuitka --project (uv_build)"
+    name: "[tool.nuitka] read by nuitka --project (uv_build)"
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -23,13 +27,23 @@ jobs:
       - name: Setup venv
         run: |
           uv --no-progress venv --python 3.13
-      - name: Install Nuitka (factory branch) and uv_build
+      - name: Install Nuitka and uv_build
         run: |
-          uv --no-progress pip install "Nuitka[onefile] @ git+https://github.com/Nuitka/Nuitka.git@factory" "uv_build==0.11.13"
+          uv --no-progress pip install "Nuitka[onefile]==4.2" "uv_build==0.11.13"
       - name: nuitka --version
         run: |
           uv --no-progress run -- python -m nuitka --version
 
-      - name: Nuitka --project ignore [tool.nuitka]
+      # The build log prints the options Nuitka derived from the project.
+      - name: Nuitka --project
         run: |
           uv --no-progress run -- python -m nuitka --project
+
+      # `output-dir` sends the build to from-pyproject-toml/, and `mode`
+      # makes it a standalone distribution. Both come from [tool.nuitka]
+      # alone: nothing on the command line asks for either.
+      - name: Check [tool.nuitka] was applied
+        run: |
+          ls -l from-pyproject-toml
+          test -x from-pyproject-toml/cli.dist/cli
+          ./from-pyproject-toml/cli.dist/cli

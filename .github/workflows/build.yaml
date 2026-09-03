@@ -5,6 +5,11 @@
       - main
   workflow_dispatch:
 
+# Reproduce https://github.com/Nuitka/Nuitka/issues/3879
+#
+# Each variant pairs `--main-entry-point` with a different companion option.
+# The baseline builds the same package the legacy way, as a control.
+
 jobs:
 
   build:
@@ -20,20 +25,20 @@ jobs:
           - windows-11-arm    # arm64
           - windows-2025      # x86
         variant:
-          # Bug A: `--main-entry-point` alone crashes immediately in early
-          # output-path setup with `AttributeError` on `_main_module`.
+          # Bug A: `--main-entry-point` alone still crashes in early
+          # output-path setup. On 4.2 the crash sits one line further on,
+          # in the `getProjectName()` fallback added for this option.
           - bug-a
-          # Bug B: same flag plus the `--output-folder-name` workaround
-          # for bug A surfaces the next missing-state failure: NuitkaCodeDeficit
-          # from the first `locateModule` call (no `_main_paths` set up).
+          # Bug B: same flag plus the `--output-folder-name` workaround for
+          # bug A. That gets past the crash and reaches a plain error asking
+          # for a project name, although this directory holds a
+          # `pyproject.toml` that names one.
           - bug-b
-          # Bug C: the maintainer's comment on #3879 names `--project-name`
-          # as the hidden option that satisfies the missing-project-name
-          # conflict introduced on factory. This variant tests whether
-          # pairing `--main-entry-point` with `--project-name=cli` produces
-          # a working binary.
+          # Bug C: `--project-name` is the hidden option that supplies the
+          # missing name. It is the one pairing that builds on 4.2.
           - bug-c
-          # Bug D: tests bare `--project` (no value).
+          # Bug D: `--project` is what the bug B error message recommends,
+          # and 4.2 refuses to take it together with `--main-entry-point`.
           - bug-d
           # Baseline: positional package + `--python-flag=-m` builds and runs.
           - baseline
@@ -53,15 +58,16 @@ jobs:
           uv --no-progress venv --python 3.13.13
       - name: Install Nuitka
         run: |
-          uv --no-progress pip install "Nuitka[onefile] @ git+https://github.com/Nuitka/Nuitka.git@factory" "uv_build==0.11.13"
+          uv --no-progress pip install "Nuitka[onefile]==4.2" "uv_build==0.11.13"
       - name: nuitka --version
         run: |
           uv --no-progress run -- python -m nuitka --version
 
-      # Bug A — expected to FAIL with:
-      #   AttributeError: 'NoneType' object has no attribute 'getOutputFilename'
-      # at OutputDirectories._getResultBaseName, because no positional script
-      # populated `_main_module`.
+      # Bug A: expected to FAIL with:
+      #   TypeError: unsupported operand type(s) for +: 'NoneType' and 'str'
+      # at OutputDirectories._getResultBaseName, where `getProjectName()`
+      # returns None because no positional script populated `_main_module`
+      # and no option supplied a project name.
       - name: "Bug A: --main-entry-point alone"
         if: matrix.variant == 'bug-a'
         run: >
@@ -70,12 +76,13 @@ jobs:
           --output-filename="cli${BIN_EXT}"
           --main-entry-point=cli=cli.cli_code:my_cli
 
-      # Bug B — expected to FAIL with:
-      #   nuitka.Errors.NuitkaCodeDeficit: Error, cannot locate modules
-      #   before import mechanism is setup.
-      # at importing.Importing.locateModule, because `_main_paths` is never
-      # populated when `--main-entry-point` is used without a positional
-      # script (only `addMainScriptDirectory` populates it).
+      # Bug B: expected to FAIL with:
+      #   FATAL: Error, '--main-entry-point' requires a project name. Use
+      #   '--project' or run from a project directory with 'pyproject.toml',
+      #   'setup.py', or 'setup.cfg'.
+      # The checkout root holds a 'pyproject.toml' with a `[project] name`,
+      # so the second half of that advice is already satisfied here. The
+      # first half is what bug D tests.
       - name: "Bug B: --main-entry-point + --output-folder-name workaround"
         if: matrix.variant == 'bug-b'
         run: >
@@ -85,9 +92,8 @@ jobs:
           --output-folder-name=cli-bug-b
           --main-entry-point=cli=cli.cli_code:my_cli
 
-      # Bug C: tests the hidden `--project-name` option the maintainer
-      # named in #3879 as the way to satisfy factory's new missing-project-
-      # name conflict when using `--main-entry-point`.
+      # Bug C: expected to SUCCEED on 4.2. `--project-name` supplies the
+      # name bug B asks for. The option is still absent from `--help`.
       - name: "Bug C: --main-entry-point + --project-name"
         if: matrix.variant == 'bug-c'
         run: >
@@ -97,7 +103,11 @@ jobs:
           --project-name=cli
           --main-entry-point=cli=cli.cli_code:my_cli
 
-      # Bug D: tests bare `--project` (no value).
+      # Bug D: expected to FAIL with:
+      #   FATAL: Error, with '--project' do not provide '--main',
+      #   '--main-entry-point', or a positional main program. The entry
+      #   points need to come from the project configuration.
+      # This is the remedy the bug B error message recommends.
       - name: "Bug D: --main-entry-point + --project"
         if: matrix.variant == 'bug-d'
         run: >
@@ -117,10 +127,9 @@ jobs:
           --output-filename="cli${BIN_EXT}"
           --python-flag=-m cli
 
-      # Bug B, Bug C, and Bug D may emit a crash report; preserve it for
-      # inspection.
+      # Any variant may emit a crash report; preserve it for inspection.
       - name: Upload Nuitka crash report
-        if: always() && (matrix.variant == 'bug-b' || matrix.variant == 'bug-c' || matrix.variant == 'bug-d')
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: nuitka-crash-report-${{ matrix.variant }}-${{ matrix.os }}
