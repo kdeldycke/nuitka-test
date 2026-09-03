@@ -1,0 +1,153 @@
+---
+"on":
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# Reproduce the `--project` data-file consistency check.
+# The upstream issue link goes here once the report is filed.
+#
+# `--project` compares the data files the project configuration implies against
+# the ones the build included, and aborts when they differ. Two ordinary
+# settings trip it, each on its own:
+#
+#   a PEP 561 `py.typed` in the package      -> Missing data files
+#   `include-package-data` for a dependency  -> Extra data files
+#
+# The same project carrying neither builds, which is the control: without it a
+# red run would not say whether `--project` can build this project at all.
+
+jobs:
+
+  project-data-files:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04      # x86
+          - macos-26          # arm64
+          - windows-2025      # x86
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          version: "0.11.13"
+
+      - name: Build one project three ways under --project
+        run: |
+          python3 - <<'PY'
+          import shutil
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          def fail(message):
+              """Report a verdict on stdout, so it lands after the evidence it refers to.
+
+              `sys.exit(message)` writes to stderr, which the Actions log interleaves
+              ahead of buffered stdout, putting the conclusion before its own reasons.
+              """
+              print(message)
+              sys.stdout.flush()
+              sys.exit(1)
+
+          TOML = """[build-system]
+          build-backend = "uv_build"
+          requires = [ "uv-build>=0.9" ]
+
+          [project]
+          name = "mypkg"
+          version = "1.0.0"
+          requires-python = ">=3.11"
+          dependencies = [{deps}]
+
+          [project.scripts]
+          mypkg = "mypkg.__main__:main"
+
+          [tool.uv]
+          build-backend.module-root = ""
+
+          [tool.nuitka]
+          {nuitka}
+          """
+
+          CASES = {
+              # Nothing unusual declared: proves `--project` builds this project.
+              "control": {"deps": "", "nuitka": 'product-name = "Mypkg"', "py_typed": False},
+              # A PEP 561 marker, which the wheel ships and no [tool.nuitka] rule names.
+              "py-typed": {"deps": "", "nuitka": 'product-name = "Mypkg"', "py_typed": True},
+              # A dependency's package data, which is what the option exists for.
+              "dep-data": {"deps": '"certifi"', "nuitka": 'include-package-data = [ "certifi" ]',
+                           "py_typed": False},
+          }
+
+          root = Path.cwd()
+          results = {}
+          for name, spec in CASES.items():
+              work = root / name
+              shutil.rmtree(work, ignore_errors=True)
+              (work / "mypkg").mkdir(parents=True)
+              (work / "mypkg" / "__init__.py").write_text("", encoding="UTF-8")
+              (work / "mypkg" / "__main__.py").write_text(
+                  'def main():\n    print("hello")\n\n\n'
+                  'if __name__ == "__main__":\n    main()\n',
+                  encoding="UTF-8",
+              )
+              if spec["py_typed"]:
+                  (work / "mypkg" / "py.typed").write_text("", encoding="UTF-8")
+              # The heredoc indents the template; strip it back to column zero.
+              body = "\n".join(line[10:] if line.startswith(" " * 10) else line
+                               for line in TOML.format(deps=spec["deps"], nuitka=spec["nuitka"]).splitlines())
+              (work / "pyproject.toml").write_text(body + "\n", encoding="UTF-8")
+
+              argv = ["uv", "--no-progress", "run", "--no-project",
+                      "--with", "nuitka==4.2", "--with", "uv_build==0.11.13"]
+              if spec["deps"]:
+                  argv += ["--with", spec["deps"].strip('"')]
+              argv += ["--", "python", "-m", "nuitka", "--project", "--mode=standalone",
+                       "--assume-yes-for-downloads"]
+
+              print(f"::group::{name}")
+              sys.stdout.flush()
+              proc = subprocess.run(argv, cwd=work, capture_output=True, text=True, encoding="UTF-8")
+              output = proc.stdout + proc.stderr
+              print(output[-3000:])
+              print("::endgroup::")
+
+              block = []
+              capture = False
+              for line in output.splitlines():
+                  if "do not match the included data files" in line:
+                      capture = True
+                  if capture:
+                      block.append(line.strip())
+              results[name] = {"returncode": proc.returncode, "block": block[:6]}
+              print(f"{name}: exit={proc.returncode}")
+              for line in block[:6]:
+                  print(f"    {line}")
+              sys.stdout.flush()
+
+          print("\n" + "=" * 70)
+          if results["control"]["returncode"] != 0:
+              fail("\nThe control did not build, so nothing here is attributable to the data files.")
+
+          reproduced = []
+          for name, marker in (("py-typed", "Missing data files:"), ("dep-data", "Extra data files:")):
+              entry = results[name]
+              if entry["returncode"] != 0 and any(marker in line for line in entry["block"]):
+                  reproduced.append(f"  {name}: {marker.rstrip(':')}")
+
+          if not reproduced:
+              print("\nBoth settings build under --project.")
+          else:
+              fail(
+                  "\nThe control builds, and these do not:\n"
+                  + "\n".join(reproduced)
+                  + "\nBoth are ordinary settings for a typed package or one bundling a dependency's data."
+              )
+          PY
