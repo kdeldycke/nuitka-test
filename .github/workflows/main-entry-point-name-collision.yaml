@@ -5,8 +5,7 @@
       - main
   workflow_dispatch:
 
-# Reproduce the `--main-entry-point` launcher name collision.
-# The upstream issue link goes here once the report is filed.
+# Reproduce https://github.com/Nuitka/Nuitka/issues/4024
 #
 # Nuitka names the module it generates for an entry point after that entry
 # point's CLI id. When the id matches the package the entry point imports
