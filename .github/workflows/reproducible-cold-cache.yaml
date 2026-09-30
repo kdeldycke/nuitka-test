@@ -76,6 +76,25 @@ jobs:
           # Standalone mode names the binary hello.bin off Windows, hello.exe on it.
           BINARIES = ("hello.bin", "hello.exe", "hello")
           BUILDS = 3
+          # What Nuitka writes into the build tree for the compiler to read. The
+          # tree also holds scons logs, debug scripts and the .sconsign database,
+          # which record paths and times, so they stay out of the comparison.
+          GENERATED = {".c", ".h", ".const", ".bin"}
+
+
+          def fail(message):
+              """Report a verdict on stdout, so it lands after the evidence it refers to.
+
+              `sys.exit(message)` writes to stderr, which the Actions log interleaves
+              ahead of buffered stdout, putting the conclusion before its own reasons.
+              """
+              print(message)
+              sys.stdout.flush()
+              sys.exit(1)
+
+
+          def digest(path):
+              return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
           def build(number):
@@ -89,17 +108,30 @@ jobs:
               subprocess.run(NUITKA + FLAGS, check=True)
               print("::endgroup::")
 
-              # Kept per build so a varying object can be read against the
-              # source it was compiled from.
+              # Kept per build so a varying file can be read against its
+              # counterparts from the other builds.
               shutil.copytree("hello.build", f"build-{number}")
 
+              tree = Path("hello.build")
+              files = {str(path.relative_to(tree)): path for path in tree.rglob("*") if path.is_file()}
               binaries = [Path("hello.dist") / name for name in BINARIES]
-              artifacts = sorted(Path("hello.build").rglob("*.o"))
-              artifacts += [binary for binary in binaries if binary.exists()]
               return {
-                  str(path.name): hashlib.sha256(path.read_bytes()).hexdigest()
-                  for path in artifacts
+                  "sources": {name: digest(path) for name, path in files.items() if path.suffix in GENERATED},
+                  "objects": {name: digest(path) for name, path in files.items() if path.suffix == ".o"},
+                  "binary": {path.name: digest(path) for path in binaries if path.exists()},
               }
+
+
+          def compare(category):
+              """Print one row per file of the category, and return the files that vary."""
+              varying = []
+              for name in sorted(set().union(*(manifest[category] for manifest in builds))):
+                  values = [manifest[category].get(name, "absent")[:12] for manifest in builds]
+                  stable = len(set(values)) == 1
+                  if not stable:
+                      varying.append(name)
+                  print(f"{'STABLE ' if stable else 'VARIES '} {name}: {' '.join(values)}")
+              return varying
 
 
           builds = [build(number) for number in range(BUILDS)]
@@ -121,33 +153,32 @@ jobs:
           for source in users[:20]:
               print(f"  {source}")
 
-          print(f"\nartifact digests over {BUILDS} builds (build #0 = cold Nuitka cache)")
-          varying = []
-          for name in sorted(builds[0]):
-              values = [manifest.get(name, "absent")[:12] for manifest in builds]
-              stable = len(set(values)) == 1
-              if not stable:
-                  varying.append(name)
-              print(f"{'STABLE ' if stable else 'VARIES '} {name}: {' '.join(values)}")
-
-          # A varying object whose generated source held still points at the
-          # toolchain; one whose source moved points at Nuitka's codegen.
-          for name in varying:
-              if not name.endswith(".o"):
-                  continue
-              sources = [Path(f"build-{index}") / f"{name[:-2]}.c" for index in range(BUILDS)]
-              if not all(source.exists() for source in sources):
-                  continue
-              seen = {hashlib.sha256(source.read_bytes()).hexdigest() for source in sources}
-              print(f"  {name[:-2]}.c was {'stable' if len(seen) == 1 else 'different'} across builds")
-
+          print(f"\ndigests over {BUILDS} builds (build #0 = cold Nuitka cache)")
+          print("\ngenerated sources")
+          sources = compare("sources")
+          print("\nobject files")
+          objects = compare("objects")
+          print("\nlinked binary")
+          binary = compare("binary")
           sys.stdout.flush()
-          objects = [name for name in varying if name.endswith(".o")]
+
+          # The verdict looks at what Nuitka writes and at what ships: the
+          # generated sources and the linked binary. Object files are shown to
+          # help locate a difference, and never decide it. Under LTO, gcc gives
+          # the sections of each object a random name suffix unless it gets
+          # -frandom-seed, which Nuitka does not pass, so on Linux every object
+          # differs between builds even when its sources and the binary match.
+          if sources:
+              fail(f"\n{len(sources)} generated source(s) vary across identical builds.")
+          if binary:
+              fail("\nThe generated sources match, but the linked binary varies (compiler, linker or signing).")
           if objects:
-              sys.exit(f"\n{len(objects)} object file(s) vary across identical cold builds.")
-          if varying:
-              sys.exit("\nObject files match; only the linked binary varies (linker or signing pass).")
-          print("\nIdentical: every object file and the final binary match byte for byte.")
+              print(
+                  f"\nThe binary and every generated source match. The {len(objects)} varying "
+                  "object file(s) are compiler noise."
+              )
+          else:
+              print("\nIdentical: every generated source, object file and the final binary match byte for byte.")
           PY
 
       - name: Upload the build trees
