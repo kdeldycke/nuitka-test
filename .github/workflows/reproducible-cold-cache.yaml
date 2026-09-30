@@ -21,8 +21,12 @@ jobs:
         nuitka:
           # Current stable release. The bug report was written against 4.1.3,
           # and 4.2 behaves the same way.
-          - label: "4.2"
-            spec: "nuitka==4.2"
+          - label: "4.2.2"
+            spec: "nuitka==4.2.2"
+          # Bleeding-edge branch, which carries the upstream fix:
+          # https://github.com/Nuitka/Nuitka/commit/0523b1accc5a7758ff1e3ef5869d7dbca05728e1
+          - label: "factory"
+            spec: "Nuitka @ git+https://github.com/Nuitka/Nuitka.git@factory"
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -160,15 +164,17 @@ jobs:
       fail-fast: false
       matrix:
         nuitka:
-          - label: "4.2"
-            spec: "nuitka==4.2"
+          - label: "4.2.2"
+            spec: "nuitka==4.2.2"
+          - label: "factory"
+            spec: "Nuitka @ git+https://github.com/Nuitka/Nuitka.git@factory"
     runs-on: macos-26
     defaults:
       run:
         shell: bash
     env:
       # The value under test. Anything the user sets here is expected to reach
-      # ccache; what actually reaches it is Nuitka's own pair of include_file
+      # ccache; what reaches it on 4.2.2 is Nuitka's own pair of include_file
       # entries, with this one dropped.
       CCACHE_SLOPPINESS: time_macros
     steps:
