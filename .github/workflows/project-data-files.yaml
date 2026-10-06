@@ -33,7 +33,7 @@ jobs:
           - label: "4.2.2"
             spec: "nuitka==4.2.2"
           # Bleeding-edge branch, which carries the upstream fix:
-          # https://github.com/Nuitka/Nuitka/commit/9cd95e4ce4e6f4a754493b94c829acf546168971
+          # https://github.com/Nuitka/Nuitka/issues/4025#issuecomment-6017506005
           - label: "factory"
             spec: "Nuitka @ git+https://github.com/Nuitka/Nuitka.git@factory"
     runs-on: ${{ matrix.os }}
