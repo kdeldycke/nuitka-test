@@ -20,7 +20,7 @@
 jobs:
 
   project-data-files:
-    name: ${{ matrix.os }}
+    name: ${{ matrix.nuitka.label }} / ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
@@ -28,6 +28,14 @@ jobs:
           - ubuntu-24.04      # x86
           - macos-26          # arm64
           - windows-2025      # x86
+        nuitka:
+          # Current stable release. The bug report was written against 4.2.
+          - label: "4.2.2"
+            spec: "nuitka==4.2.2"
+          # Bleeding-edge branch, which carries the upstream fix:
+          # https://github.com/Nuitka/Nuitka/commit/9cd95e4ce4e6f4a754493b94c829acf546168971
+          - label: "factory"
+            spec: "Nuitka @ git+https://github.com/Nuitka/Nuitka.git@factory"
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -38,8 +46,11 @@ jobs:
           version: "0.11.13"
 
       - name: Build one project three ways under --project
+        env:
+          NUITKA_SPEC: ${{ matrix.nuitka.spec }}
         run: |
           python3 - <<'PY'
+          import os
           import shutil
           import subprocess
           import sys
@@ -110,7 +121,7 @@ jobs:
               (work / "pyproject.toml").write_text(body + "\n", encoding="UTF-8")
 
               argv = ["uv", "--no-progress", "run", "--no-project",
-                      "--with", "nuitka==4.2", "--with", "uv_build==0.11.13"]
+                      "--with", os.environ["NUITKA_SPEC"], "--with", "uv_build==0.11.13"]
               if spec["deps"]:
                   argv += ["--with", spec["deps"].strip('"')]
               argv += ["--", "python", "-m", "nuitka", "--project", "--mode=standalone",
@@ -140,18 +151,20 @@ jobs:
           if results["control"]["returncode"] != 0:
               fail("\nThe control did not build, so nothing here is attributable to the data files.")
 
-          reproduced = []
+          failing = []
           for name, marker in (("py-typed", "Missing data files:"), ("dep-data", "Extra data files:")):
               entry = results[name]
-              if entry["returncode"] != 0 and any(marker in line for line in entry["block"]):
-                  reproduced.append(f"  {name}: {marker.rstrip(':')}")
+              if entry["returncode"] != 0:
+                  # A failure without the reported message is still not a build.
+                  reported = any(marker in line for line in entry["block"])
+                  failing.append(f"  {name}: {marker.rstrip(':') if reported else 'another failure'}")
 
-          if not reproduced:
+          if not failing:
               print("\nBoth settings build under --project.")
           else:
               fail(
                   "\nThe control builds, and these do not:\n"
-                  + "\n".join(reproduced)
+                  + "\n".join(failing)
                   + "\nBoth are ordinary settings for a typed package or one bundling a dependency's data."
               )
           PY
