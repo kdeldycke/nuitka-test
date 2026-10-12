@@ -1,0 +1,445 @@
+---
+# TEMPORARY probe workflow, to be deleted once Nuitka 4.3 is qualified for
+# kdeldycke/repomatic.
+#
+# repomatic compiles its own binary with Nuitka on six targets, behind four
+# workarounds for the Nuitka issues this repository reproduces. This probe
+# builds that binary with the changes that adopt Nuitka 4.3 and drop the
+# workarounds, before those changes reach repomatic's own release pipeline.
+#
+# `repomatic-nuitka-4.3.patch` holds the changes. Each job applies it to the
+# repomatic commit named below, then runs the steps of the `compile-binaries`
+# job of repomatic's `_release-engine.yaml`.
+"on":
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/repomatic-nuitka-probe.yaml
+      - repomatic-nuitka-4.3.patch
+  workflow_dispatch:
+
+env:
+  # Hold every install to the cooldown. Nuitka 4.3 is younger than the window:
+  # the `build` job reaches it through the `exclude-newer-package` entry the
+  # patch adds to repomatic's `pyproject.toml`, and the other jobs name the
+  # exemption on the command line.
+  UV_EXCLUDE_NEWER: "1 week"
+  # The repomatic commit the patch was cut from.
+  REPOMATIC_REF: 640765834ac0dcf368a5e936003aadfbd6961ff2
+
+jobs:
+
+  # The question: does the patched repomatic build a working binary on every
+  # release target?
+  #
+  # `entry-point` is the invocation the patch moves to: Nuitka's
+  # `--main-entry-point`, which needs the fixes for Nuitka#3879 and
+  # Nuitka#4024. `positional` keeps the invocation repomatic used on 4.2.2, a
+  # package directory plus `--python-flag=-m`. It is the control: a failure
+  # that both variants share is not caused by the entry point.
+  build:
+    name: ${{ matrix.variant }} / ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - entry-point
+          - positional
+        target:
+          - linux-arm64
+          - linux-x64
+          - macos-arm64
+          - macos-x64
+          - windows-arm64
+          - windows-x64
+        # Copied from `NUITKA_BUILD_TARGETS` in repomatic/release/binary.py.
+        include:
+          - target: linux-arm64
+            os: ubuntu-26.04-arm
+            platform_id: linux
+            extension: bin
+            container: "quay.io/pypa/manylinux_2_28_aarch64\
+              @sha256:e7035406e58d96b7407246af1f6514a3cbd753a0025b42b9adfbeadd3b29ba80"
+          - target: linux-x64
+            os: ubuntu-26.04
+            platform_id: linux
+            extension: bin
+            container: "quay.io/pypa/manylinux_2_28_x86_64\
+              @sha256:fdb9a9c223b215604dc7b6f7e8fff4b39bfea5fbaa7777a2e5544a60dfa437f8"
+          - target: macos-arm64
+            os: macos-26
+            platform_id: macos
+            extension: bin
+            floor: "11.0"
+          - target: macos-x64
+            os: macos-26-intel
+            platform_id: macos
+            extension: bin
+            floor: "10.15"
+          - target: windows-arm64
+            os: windows-11-arm
+            platform_id: windows
+            extension: exe
+          - target: windows-x64
+            os: windows-2025
+            platform_id: windows
+            extension: exe
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+        working-directory: repomatic
+    env:
+      NUITKA_CACHE_DIR: ${{ github.workspace }}/.nuitka-cache
+      CCACHE_DIR: ${{ github.workspace }}/.nuitka-cache/ccache
+      CCACHE_COMPILERCHECK: content
+      BIN_NAME: repomatic-probe-${{ matrix.target }}.${{ matrix.extension }}
+      # The repomatic checkout is not owned by the user the container runs as.
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: safe.directory
+      GIT_CONFIG_VALUE_0: "*"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          repository: kdeldycke/repomatic
+          ref: ${{ env.REPOMATIC_REF }}
+          path: repomatic
+      # The patch is read out of the object store, not from the working tree:
+      # a Windows checkout rewrites the line endings of the working-tree copy.
+      - name: Apply the candidate changes
+        run: git -C .. show HEAD:repomatic-nuitka-4.3.patch | git apply --verbose
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          version: "0.12.17"
+      - name: Install ccache in container
+        if: matrix.container
+        run: >
+          (dnf install --assumeyes --quiet epel-release
+          && dnf install --assumeyes --quiet ccache)
+          || echo "ccache unavailable, building uncached."
+      - name: Setup venv
+        run: >
+          uv --no-progress
+          ${{ matrix.platform_id != 'windows' && '--managed-python' || '' }}
+          venv --python 3.14
+      - name: Pre-bake build metadata
+        run: uvx --no-progress 'click-extra==9.4.1' prebake all
+
+      - name: Build binary
+        env:
+          VARIANT: ${{ matrix.variant }}
+          NUITKA_CCACHE_FLAG: >-
+            ${{ matrix.platform_id == 'macos' && '--disable-ccache' || '' }}
+          MACOSX_DEPLOYMENT_TARGET: >-
+            ${{ matrix.platform_id == 'macos' && matrix.floor || '' }}
+        run: |
+          set -o pipefail
+          # NUITKA_CCACHE_FLAG holds an optional flag, meant to word-split.
+          # shellcheck disable=SC2086
+          if [[ "${VARIANT}" == "entry-point" ]]; then
+            uv --no-progress run --frozen -- repomatic run nuitka -- \
+              ${NUITKA_CCACHE_FLAG} \
+              --project-name=repomatic \
+              --main-entry-point=repomatic=repomatic.__main__:main \
+              --output-filename="${BIN_NAME}" 2>&1 | tee build.log
+          else
+            uv --no-progress run --frozen -- repomatic run nuitka -- \
+              --python-flag=-m ${NUITKA_CCACHE_FLAG} \
+              --output-filename="${BIN_NAME}" repomatic 2>&1 | tee build.log
+          fi
+      - name: Upload Nuitka crash report
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: nuitka-crash-report-${{ matrix.variant }}-${{ matrix.target }}
+          if-no-files-found: ignore
+          path: repomatic/nuitka-crash-report.xml
+
+      # The patch pins 4.3, turns the update check off and removes the staging
+      # copy of symlinked data directories. Each claim is read off the command
+      # line Nuitka echoes, so a build that ran the old code cannot pass.
+      - name: "Gate: the patched tool runner drove Nuitka 4.3"
+        run: |
+          need() {
+            grep -q -- "$1" build.log || { echo "Missing from the build log: $1"; exit 1; }
+          }
+          need "Version '4.3' on Python 3.14"
+          need "--update-check=never"
+          need "--include-data-dir=repomatic/data/skills=repomatic/data/skills"
+          if grep -q "repomatic-data-dir-" build.log; then
+            echo "The symlink staging copy still ran."
+            exit 1
+          fi
+          if grep -q "outdated-nuitka-version" build.log; then
+            echo "The update check still ran."
+            exit 1
+          fi
+
+      # Nuitka#3994. Every file under repomatic/data/skills is a symlink into
+      # .claude/skills, a tree no inclusion flag names. Each one must reach the
+      # distribution as the content of its target. The comparison is against
+      # the target, not the link: on a checkout that turned the links into text
+      # files, a comparison against the link would pass on the wrong content.
+      - name: "Gate: symlinked data files ship as their content"
+        run: |
+          uv --no-progress run --frozen --no-sync -- python - <<'PY'
+          import sys
+          from pathlib import Path
+
+          source = Path("repomatic/data/skills")
+          canonical = Path(".claude/skills")
+          dists = sorted(Path.cwd().glob("*.dist"))
+          print(f"distribution directories: {[d.name for d in dists]}")
+          if len(dists) != 1:
+              print("Expected exactly one distribution directory.")
+              sys.exit(1)
+          shipped_root = dists[0] / "repomatic" / "data" / "skills"
+
+          expected = sorted(p.relative_to(source).as_posix() for p in source.rglob("*") if not p.is_dir())
+          shipped = sorted(
+              p.relative_to(shipped_root).as_posix() for p in shipped_root.rglob("*") if not p.is_dir()
+          )
+          links = sum(1 for name in expected if (source / name).is_symlink())
+          print(f"{len(expected)} source file(s), {links} of them symlinks, {len(shipped)} shipped")
+
+          problems = []
+          if not expected:
+              problems.append("the source tree holds no file, so nothing was tested")
+          if shipped != expected:
+              problems.append(f"file lists differ: {sorted(set(expected) ^ set(shipped))}")
+          for name in shipped:
+              path = shipped_root / name
+              if path.is_symlink():
+                  problems.append(f"{name}: shipped as a symlink")
+              elif not (canonical / name).is_file():
+                  problems.append(f"{name}: no target at {canonical / name}")
+              elif path.read_bytes() != (canonical / name).read_bytes():
+                  problems.append(f"{name}: content differs from {canonical / name}")
+
+          for problem in problems:
+              print(f"  {problem}")
+          sys.stdout.flush()
+          if problems:
+              sys.exit(1)
+          print("Every data file ships as the content of its target.")
+          PY
+
+      - name: Verify binary architecture and OS floor
+        env:
+          TARGET: ${{ matrix.target }}
+        run: >
+          uv --no-progress run --frozen -- repomatic
+          verify-binary --target "${TARGET}" --binary "${BIN_NAME}"
+
+      # Nuitka#4024. The entry point is named after its package, which made
+      # the 4.2 binary fail on its first import.
+      - name: "Gate: the binary starts and reports its own name"
+        run: |
+          "./${BIN_NAME}" --version | tee version.txt
+          grep -q "^repomatic, version 7\." version.txt
+
+      - name: Self-test binary
+        env:
+          PYTHONIOENCODING: utf8
+        run: >
+          uv --no-progress run --frozen --
+          click-extra test-suite
+          --binary "./${BIN_NAME}"
+          --jobs max
+
+  # The question: does ccache still read the `ccache.conf` repomatic writes?
+  #
+  # Nuitka 4.3 gives the ccache directory one subdirectory per Python ABI.
+  # repomatic writes its settings to `$NUITKA_CACHE_DIR/ccache/ccache.conf`,
+  # one level above. `default` leaves the directory to Nuitka and is the
+  # control: it must show the file is not read. `explicit` exports the
+  # `CCACHE_DIR` the patch adds to the release workflow.
+  ccache-config:
+    name: ccache.conf / CCACHE_DIR ${{ matrix.ccache_dir }}
+    strategy:
+      fail-fast: false
+      matrix:
+        ccache_dir:
+          - default
+          - explicit
+    runs-on: ubuntu-26.04
+    container: "quay.io/pypa/manylinux_2_28_x86_64\
+      @sha256:fdb9a9c223b215604dc7b6f7e8fff4b39bfea5fbaa7777a2e5544a60dfa437f8"
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    env:
+      NUITKA_CACHE_DIR: ${{ github.workspace }}/.nuitka-cache
+      CCACHE_COMPILERCHECK: content
+      MODE: ${{ matrix.ccache_dir }}
+    steps:
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          version: "0.12.17"
+      - name: Install ccache in container
+        run: |
+          dnf install --assumeyes --quiet epel-release
+          dnf install --assumeyes --quiet ccache
+          ccache --version | head -1
+      # The same lines as the `Prepare Nuitka cache` step of the patched
+      # release workflow.
+      - name: Write ccache.conf where repomatic writes it
+        run: |
+          mkdir -p .nuitka-cache/ccache
+          printf 'compiler_check = content\n' > .nuitka-cache/ccache/ccache.conf
+          printf 'base_dir = %s\n' "$(dirname "${RUNNER_WORKSPACE}")" \
+            >> .nuitka-cache/ccache/ccache.conf
+          cat .nuitka-cache/ccache/ccache.conf
+      - name: Build
+        run: |
+          printf 'print("hello world")\n' > hello.py
+          if [[ "${MODE}" == "explicit" ]]; then
+            export CCACHE_DIR="${NUITKA_CACHE_DIR}/ccache"
+          fi
+          echo "CCACHE_DIR=${CCACHE_DIR:-<unset>}"
+          uv --no-progress run --no-project --managed-python --python 3.14 \
+            --exclude-newer-package nuitka=P0D --with 'nuitka==4.3' -- \
+            python -m nuitka --mode=standalone --assume-yes-for-downloads \
+            --update-check=never hello.py
+      # enableCcache() points CCACHE_LOGFILE at hello.build/ccache-{pid}.txt.
+      # Its header prints the configuration ccache ran with, and where each
+      # setting came from.
+      - name: "Gate: where ccache read its settings from"
+        run: |
+          uv --no-progress run --no-project --managed-python --python 3.14 -- python - <<'PY'
+          import os
+          import re
+          import sys
+          from pathlib import Path
+
+          logs = sorted(Path("hello.build").glob("ccache-*.txt"))
+          if not logs:
+              print("No ccache log: the compiler wrapper never ran, so the test is void.")
+              sys.exit(1)
+
+          # One line per setting: `Config: ({origin}) {key} = {value}`.
+          pattern = re.compile(r"Config: \((?P<origin>.*)\) (?P<key>\w+) = ?(?P<value>.*)$")
+          settings = {}
+          for log in logs:
+              for line in log.read_text(encoding="UTF-8", errors="replace").splitlines():
+                  match = pattern.search(line)
+                  if match:
+                      settings.setdefault(match["key"], set()).add((match["origin"], match["value"].strip()))
+          wanted = ("base_dir", "cache_dir", "compiler_check", "sloppiness")
+          for key in wanted:
+              for origin, value in sorted(settings.get(key, ())):
+                  print(f"({origin}) {key} = {value}")
+          sys.stdout.flush()
+
+          def setting(key):
+              found = settings.get(key, set())
+              if len(found) != 1:
+                  print(f"Expected one {key} setting in the ccache log, found {len(found)}.")
+                  sys.exit(1)
+              return next(iter(found))
+
+          base_origin, base_dir = setting("base_dir")
+          _, cache_dir = setting("cache_dir")
+          check_origin, compiler_check = setting("compiler_check")
+          _, sloppiness = setting("sloppiness")
+          conf = Path(".nuitka-cache/ccache/ccache.conf").resolve()
+          written = conf.parent
+
+          problems = []
+          if os.environ["MODE"] == "explicit":
+              if Path(cache_dir).resolve() != written:
+                  problems.append(f"cache_dir is {cache_dir}, expected {written}")
+              if Path(base_origin).resolve() != conf:
+                  problems.append(f"base_dir came from {base_origin!r}, expected {conf}")
+              if not base_dir:
+                  problems.append("base_dir is empty")
+          else:
+              # The control: the file one level above the ABI directory is
+              # not the one ccache reads.
+              if Path(cache_dir).resolve().parent != written:
+                  problems.append(f"cache_dir is {cache_dir}, expected a subdirectory of {written}")
+              if base_dir:
+                  problems.append(f"base_dir is {base_dir!r}, so the file was read after all")
+          # The job-level variable is the second channel, in both modes.
+          if compiler_check != "content":
+              problems.append(f"compiler_check is {compiler_check!r} (from {check_origin!r})")
+          # The patch stops asking for time_macros.
+          if "time_macros" in sloppiness:
+              problems.append(f"sloppiness still holds time_macros: {sloppiness!r}")
+
+          for problem in problems:
+              print(f"  {problem}")
+          sys.stdout.flush()
+          if problems:
+              sys.exit(1)
+          print(f"\nccache settings match the {os.environ['MODE']} case.")
+          PY
+
+  # The question: does `--main-entry-point` build a project whose package
+  # lives under `src/`?
+  #
+  # The positional invocation resolved its main program as a file path from
+  # the repository root, so repomatic skipped every src-layout entry point.
+  # `--main-entry-point` imports the module by name from the environment.
+  src-layout:
+    name: src layout / ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04      # x86
+          - windows-2025      # x86
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    env:
+      BIN_NAME: mypkg${{ contains(matrix.os, 'windows') && '.exe' || '.bin' }}
+    steps:
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7  # v10.2.0
+        with:
+          version: "0.12.17"
+      - name: Create a src-layout project
+        run: |
+          mkdir -p proj/src/mypkg
+          touch proj/src/mypkg/__init__.py
+          printf 'def main():\n    print("hello from mypkg")\n\n\nif __name__ == "__main__":\n    main()\n' \
+            > proj/src/mypkg/__main__.py
+          printf '%s\n' \
+            '[build-system]' \
+            'build-backend = "uv_build"' \
+            'requires = [ "uv-build>=0.9" ]' \
+            '' \
+            '[project]' \
+            'name = "mypkg"' \
+            'version = "1.0.0"' \
+            'requires-python = ">=3.11"' \
+            '' \
+            '[project.scripts]' \
+            'mypkg = "mypkg.__main__:main"' \
+            > proj/pyproject.toml
+          cat proj/pyproject.toml
+      # `uv run` installs the project in editable mode, as it does in
+      # repomatic's release workflow. No copy of the package sits in the
+      # directory the build runs from.
+      - name: Build from the project root
+        working-directory: proj
+        run: >
+          uv --no-progress run --python 3.13
+          --exclude-newer-package nuitka=P0D --with 'nuitka[onefile]==4.3' --
+          python -m nuitka --mode=onefile --assume-yes-for-downloads
+          --update-check=never
+          --project-name=mypkg
+          --main-entry-point=mypkg=mypkg.__main__:main
+          --output-filename="${BIN_NAME}"
+      - name: "Gate: the binary runs the entry point"
+        working-directory: proj
+        run: |
+          "./${BIN_NAME}" | tee run.txt
+          grep -q "^hello from mypkg$" run.txt
