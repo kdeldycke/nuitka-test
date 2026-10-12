@@ -5,6 +5,8 @@
       - main
   workflow_dispatch:
 
+# Reproduce https://github.com/Nuitka/Nuitka/issues/4087
+#
 # One function gains one local variable, and no C file of the program hits the
 # compile cache.
 #
