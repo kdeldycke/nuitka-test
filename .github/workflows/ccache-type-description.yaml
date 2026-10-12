@@ -1,0 +1,179 @@
+---
+"on":
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+# One function gains one local variable, and no C file of the program hits the
+# compile cache.
+#
+# Since Nuitka 4.3 the type description of every frame is declared in
+# `__constants.h`: one line for each distinct description of the whole
+# program. Every generated C file includes that header. A function that gains
+# one local variable can add a description to the list, and the header then
+# changes for every file.
+#
+# Four builds of one small program run in one job, on one ccache directory:
+#
+#   1. Cold: it fills the cache.
+#   2. Nothing changed. This is the control: it proves ccache works here.
+#   3. One function changes and keeps its variables. This is the second
+#      control: it gives the cost of an ordinary edit.
+#   4. Another function gains one local variable. This is the case.
+#
+# Nuitka 4.2.2 runs beside 4.3 and is the control across versions: it keeps no
+# such list. The `develop` cell is pinned to the commit the branch held when
+# this file was written.
+
+# Hold every install to the cooldown: nothing uploaded in the last week
+# resolves. Nuitka 4.3 is younger than that, so each command installing it
+# exempts that one package and leaves its dependencies gated.
+env:
+  UV_EXCLUDE_NEWER: "1 week"
+
+jobs:
+
+  new-local-variable:
+    name: one more local variable / Nuitka ${{ matrix.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: "4.2.2"
+            requirement: "nuitka==4.2.2"
+          - label: "4.3"
+            requirement: "nuitka==4.3"
+          - label: "develop"
+            requirement: >-
+              nuitka @
+              https://github.com/Nuitka/Nuitka/archive/ca5369243627bba00ab99742d3d98882d838a72f.zip
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        shell: bash
+    env:
+      CCACHE_DIR: ${{ github.workspace }}/ccache
+      NUITKA_CACHE_DIR: ${{ github.workspace }}/nuitka-cache
+      REQUIREMENT: ${{ matrix.requirement }}
+    steps:
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          version: "0.11.13"
+      # Nuitka expects the OS package of ccache on Linux, and the runner image
+      # ships without one, which leaves the job with nothing to measure.
+      - name: Install ccache
+        run: |
+          sudo apt-get --quiet update
+          sudo apt-get --quiet --yes --no-install-recommends install ccache
+      - name: Create the program
+        run: |
+          mkdir fruit
+          touch fruit/__init__.py
+          cat > fruit/apple.py <<'PY'
+          def weigh(count, unit):
+              total = count * unit
+              return total
+          PY
+          cat > fruit/pear.py <<'PY'
+          def price(weight, rate):
+              cost = weight * rate
+              return cost
+          PY
+          cat > main.py <<'PY'
+          from fruit import apple, pear
+
+          print(pear.price(apple.weigh(3, 150), 2))
+          PY
+      - name: Report the Nuitka version
+        run: >
+          uv --no-progress run --no-project --python 3.13 --exclude-newer-package nuitka=P0D --with "${REQUIREMENT}" --
+          python -m nuitka --version
+      - name: Build four times and compare the cache hits
+        run: |
+          python3 - <<'PY'
+          import difflib
+          import os
+          import re
+          import shutil
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          def fail(message):
+              """Report a verdict on stdout, so it lands after the evidence it refers to."""
+              print(message)
+              sys.stdout.flush()
+              sys.exit(1)
+
+          RESULT = re.compile(r"result '(cache hit|cache miss)': (\d+)")
+          NUITKA = [
+              "uv", "--no-progress", "run", "--no-project", "--python", "3.13",
+              "--exclude-newer-package", "nuitka=P0D", "--with", os.environ["REQUIREMENT"], "--",
+              "python", "-m", "nuitka", "--follow-imports", "main.py",
+          ]
+
+          def changes(before, after):
+              """Return the changed lines of a text, without the diff headers."""
+              delta = difflib.unified_diff(before.splitlines(), after.splitlines(), lineterm="", n=0)
+              return [line for line in delta if not line.startswith(("---", "+++", "@@"))]
+
+          def edit(path, content):
+              """Rewrite one source file, and print what changed in it."""
+              before = Path(path).read_text(encoding="UTF-8")
+              Path(path).write_text(content, encoding="UTF-8")
+              print(f"\nedit of {path}:")
+              for line in changes(before, content):
+                  print(f"  {line}")
+              sys.stdout.flush()
+
+          def build(number, title):
+              shutil.rmtree("main.build", ignore_errors=True)
+              print(f"::group::build #{number}: {title}")
+              sys.stdout.flush()
+              # Nuitka reports the ccache tally on stderr: read both streams as one.
+              proc = subprocess.run(
+                  NUITKA, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="UTF-8",
+              )
+              print(proc.stdout)
+              print("::endgroup::")
+              if proc.returncode != 0:
+                  fail(f"build #{number} failed")
+
+              counts = {kind: int(value) for kind, value in RESULT.findall(proc.stdout)}
+              hits = counts.get("cache hit", 0)
+              misses = counts.get("cache miss", 0)
+              print(f"build #{number} ({title}): {hits} hit(s), {misses} miss(es)")
+              sys.stdout.flush()
+              header = Path("main.build/__constants.h").read_text(encoding="UTF-8")
+              return {"hits": hits, "misses": misses, "header": header}
+
+          build(1, "cold")
+          second = build(2, "nothing changed")
+
+          edit("fruit/apple.py", "def weigh(count, unit):\n    total = count * unit\n    return total + 1\n")
+          third = build(3, "one function changed, same variables")
+
+          edit(
+              "fruit/pear.py",
+              "def price(weight, rate):\n    cost = weight * rate\n    tax = cost / 10\n    return cost + tax\n",
+          )
+          fourth = build(4, "one function gained one local variable")
+
+          print("\n__constants.h, build #3 against build #4:")
+          for line in changes(third["header"], fourth["header"]) or ["(identical)"]:
+              print(f"  {line}")
+          print()
+          sys.stdout.flush()
+
+          if second["hits"] == 0:
+              fail("The control build missed too: ccache is not working here, so the test is void.")
+          if third["hits"] == 0:
+              fail("The edit that kept the variables missed every file too, so the test is void.")
+          if fourth["hits"] == 0:
+              fail(
+                  f"Every one of the {fourth['misses']} file(s) missed after one function gained one local "
+                  f"variable. The edit that kept the variables scored {third['hits']} hit(s)."
+              )
+          print("The build after the new local variable still hit the cache.")
+          PY
