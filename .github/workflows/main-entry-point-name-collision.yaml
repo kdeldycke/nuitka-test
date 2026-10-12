@@ -18,10 +18,16 @@
 # needs the package to come from the environment rather than the build
 # directory, which is what an installed distribution does.
 
+# Hold every install to the cooldown: nothing uploaded in the last week
+# resolves. Nuitka 4.3 is younger than that, so each command installing it
+# exempts that one package and leaves its dependencies gated.
+env:
+  UV_EXCLUDE_NEWER: "1 week"
+
 jobs:
 
   name-collision:
-    name: ${{ matrix.os }}
+    name: ${{ matrix.nuitka }} / ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
@@ -29,6 +35,12 @@ jobs:
           - ubuntu-24.04      # x86
           - macos-26          # arm64
           - windows-2025      # x86
+        nuitka:
+          # Last release of the series the report was written against.
+          - "4.2.2"
+          # First release carrying the upstream fix:
+          # https://github.com/Nuitka/Nuitka/issues/4024#issuecomment-6025688447
+          - "4.3"
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -39,6 +51,8 @@ jobs:
           version: "0.11.13"
 
       - name: Build the same package under two entry-point names
+        env:
+          NUITKA_VERSION: ${{ matrix.nuitka }}
         run: |
           python3 - <<'PY'
           import os
@@ -84,7 +98,8 @@ jobs:
           # below builds from a directory holding a copy of the sources.
           subprocess.run(
               ["uv", "--no-progress", "pip", "install", "--python", str(python),
-               "nuitka==4.2", str(root / "proj")],
+               "--exclude-newer-package", "nuitka=P0D",
+               f"nuitka=={os.environ['NUITKA_VERSION']}", str(root / "proj")],
               check=True,
           )
 

@@ -17,6 +17,12 @@
 # The same project carrying neither builds, which is the control: without it a
 # red run would not say whether `--project` can build this project at all.
 
+# Hold every install to the cooldown: nothing uploaded in the last week
+# resolves. Nuitka 4.3 is younger than that, so each command installing it
+# exempts that one package and leaves its dependencies gated.
+env:
+  UV_EXCLUDE_NEWER: "1 week"
+
 jobs:
 
   project-data-files:
@@ -29,13 +35,13 @@ jobs:
           - macos-26          # arm64
           - windows-2025      # x86
         nuitka:
-          # Current stable release. The bug report was written against 4.2.
+          # Last release of the series the report was written against.
           - label: "4.2.2"
             spec: "nuitka==4.2.2"
-          # Bleeding-edge branch, which carries the upstream fix:
+          # First release carrying the upstream fix:
           # https://github.com/Nuitka/Nuitka/issues/4025#issuecomment-6017506005
-          - label: "factory"
-            spec: "Nuitka @ git+https://github.com/Nuitka/Nuitka.git@factory"
+          - label: "4.3"
+            spec: "nuitka==4.3"
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -121,6 +127,7 @@ jobs:
               (work / "pyproject.toml").write_text(body + "\n", encoding="UTF-8")
 
               argv = ["uv", "--no-progress", "run", "--no-project",
+                      "--exclude-newer-package", "nuitka=P0D",
                       "--with", os.environ["NUITKA_SPEC"], "--with", "uv_build==0.11.13"]
               if spec["deps"]:
                   argv += ["--with", spec["deps"].strip('"')]

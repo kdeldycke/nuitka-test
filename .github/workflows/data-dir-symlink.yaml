@@ -14,7 +14,8 @@
 # instead of as its content. Nothing ever creates the target, so the link
 # dangles. On macOS the signing pass then stats every distribution file and
 # dies with `FileNotFoundError`; on Linux the build reports success and ships
-# the broken link.
+# the broken link. Nuitka 4.3 copies the content when the target of the link
+# is not part of the distribution.
 #
 # Windows is left out on purpose. `copyFileWithPermissions` in
 # `nuitka/utils/FileOperations.py` short-circuits its symlink branch on
@@ -22,6 +23,12 @@
 # path under test. Git Bash's `ln -s` also copies instead of linking unless
 # `MSYS=winsymlinks:nativestrict` is set, so the job would not even build the
 # right input tree.
+
+# Hold every install to the cooldown: nothing uploaded in the last week
+# resolves. Nuitka 4.3 is younger than that, so each command installing it
+# exempts that one package and leaves its dependencies gated.
+env:
+  UV_EXCLUDE_NEWER: "1 week"
 
 jobs:
 
@@ -36,10 +43,14 @@ jobs:
           - macos-26          # arm64
           - macos-26-intel    # x86
         nuitka:
-          # Current stable release. The bug report was written against 4.1.3,
-          # and 4.2 behaves the same way.
-          - label: "4.2"
-            spec: "nuitka==4.2"
+          # Last release before the fix. The bug report was written against
+          # 4.1.3, and the 4.2 series behaves the same way.
+          - label: "4.2.2"
+            spec: "nuitka==4.2.2"
+          # First release carrying the upstream fix:
+          # https://github.com/Nuitka/Nuitka/issues/3994#issuecomment-6027465635
+          - label: "4.3"
+            spec: "nuitka==4.3"
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -53,7 +64,7 @@ jobs:
           uv --no-progress venv --python 3.14
       - name: Install Nuitka
         run: |
-          uv --no-progress pip install "${{ matrix.nuitka.spec }}"
+          uv --no-progress pip install --exclude-newer-package nuitka=P0D "${{ matrix.nuitka.spec }}"
       - name: nuitka --version
         run: |
           uv --no-progress run -- python -m nuitka --version
@@ -76,12 +87,13 @@ jobs:
             && echo "source link resolves, as it should" \
             || echo "source link is already broken, reproducer is invalid"
 
-      # Expected to FAIL on macOS with:
+      # On 4.2.2, expected to FAIL on macOS with:
       #   FileNotFoundError: [Errno 2] No such file or directory:
       #   'myapp.dist/myapp/data/NOTE.md'
       # raised by signDistributionMacOS -> withMadeWritableFileMode -> os.stat.
       # Expected to SUCCEED on Linux, which never signs, leaving the dangling
-      # link in the distribution unreported.
+      # link in the distribution unreported. On 4.3, expected to SUCCEED on
+      # both.
       - name: Build
         run: >
           uv --no-progress run -- python -m nuitka

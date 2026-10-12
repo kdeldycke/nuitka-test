@@ -20,6 +20,12 @@
 # ccache on PATH, so a plain build fetches one. The same helper serves the
 # winlibs gcc, depends.exe, appimagetool and NSIS downloads on other systems.
 
+# Hold every install to the cooldown: nothing uploaded in the last week
+# resolves. Nuitka 4.3 is younger than that, so each command installing it
+# exempts that one package and leaves its dependencies gated.
+env:
+  UV_EXCLUDE_NEWER: "1 week"
+
 jobs:
 
   download-integrity:
@@ -39,7 +45,7 @@ jobs:
           uv --no-progress venv --python 3.14
       - name: Install Nuitka
         run: |
-          uv --no-progress pip install "nuitka==4.2"
+          uv --no-progress pip install --exclude-newer-package nuitka=P0D "nuitka==4.3"
       - name: nuitka --version
         run: |
           uv --no-progress run -- python -m nuitka --version

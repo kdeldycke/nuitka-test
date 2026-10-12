@@ -22,6 +22,12 @@
 # `path-change` isolates the variable on one machine. `cross-machine` is the
 # case the issue title names: two runners sharing one ccache directory.
 
+# Hold every install to the cooldown: nothing uploaded in the last week
+# resolves. Nuitka 4.3 is younger than that, so each command installing it
+# exempts that one package and leaves its dependencies gated.
+env:
+  UV_EXCLUDE_NEWER: "1 week"
+
 jobs:
 
   # Three builds, one ccache, one machine. Build 2 repeats build 1 with the
@@ -78,14 +84,15 @@ jobs:
               sys.stdout.flush()
               sys.exit(1)
 
-          NUITKA = "nuitka==4.2"
+          NUITKA = "nuitka==4.3"
           RESULT = re.compile(r"result '(cache hit|cache miss)': (\d+)")
 
           def run(argv, uv_cache):
               env = dict(os.environ)
               env["UV_CACHE_DIR"] = str(uv_cache)
               return subprocess.run(
-                  ["uv", "--no-progress", "run", "--no-project", "--python", "3.13", "--with", NUITKA, "--"] + argv,
+                  ["uv", "--no-progress", "run", "--no-project", "--python", "3.13",
+                   "--exclude-newer-package", "nuitka=P0D", "--with", NUITKA, "--"] + argv,
                   env=env, capture_output=True, text=True, encoding="UTF-8",
               )
 
@@ -178,11 +185,11 @@ jobs:
           printf 'print("hello world")\n' > hello.py
       - name: Build
         run: >
-          uv --no-progress run --no-project --python 3.13 --with "nuitka==4.2" --
+          uv --no-progress run --no-project --python 3.13 --exclude-newer-package nuitka=P0D --with "nuitka==4.3" --
           python -m nuitka --mode=standalone --assume-yes-for-downloads hello.py
       - name: Report where Nuitka was imported from
         run: >
-          uv --no-progress run --no-project --python 3.13 --with "nuitka==4.2" --
+          uv --no-progress run --no-project --python 3.13 --exclude-newer-package nuitka=P0D --with "nuitka==4.3" --
           python -c "import nuitka; print(nuitka.__file__)"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
@@ -213,11 +220,11 @@ jobs:
           printf 'print("hello world")\n' > hello.py
       - name: Report where Nuitka was imported from
         run: >
-          uv --no-progress run --no-project --python 3.13 --with "nuitka==4.2" --
+          uv --no-progress run --no-project --python 3.13 --exclude-newer-package nuitka=P0D --with "nuitka==4.3" --
           python -c "import nuitka; print(nuitka.__file__)"
       - name: Build against the other runner's cache
         run: |
-          uv --no-progress run --no-project --python 3.13 --with "nuitka==4.2" -- \
+          uv --no-progress run --no-project --python 3.13 --exclude-newer-package nuitka=P0D --with "nuitka==4.3" -- \
             python -m nuitka --mode=standalone --assume-yes-for-downloads hello.py 2>&1 | tee build.log
       - name: Check the cache was reused
         run: |
