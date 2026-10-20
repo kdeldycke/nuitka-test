@@ -25,12 +25,13 @@
 #   4. Another function gains one local variable. This is the case.
 #
 # Nuitka 4.2.2 runs beside 4.3 and is the control across versions: it keeps no
-# such list. The `develop` cell is pinned to the commit the branch held when
-# this file was written.
+# such list. 4.3.1 is the hotfix release the issue was closed with. The
+# `develop` cell is pinned to the commit the branch held when this file was
+# written.
 
 # Hold every install to the cooldown: nothing uploaded in the last week
-# resolves. Nuitka 4.3 is younger than that, so each command installing it
-# exempts that one package and leaves its dependencies gated.
+# resolves. Nuitka 4.3.1 is younger than that, so each command installing
+# Nuitka exempts that one package and leaves its dependencies gated.
 env:
   UV_EXCLUDE_NEWER: "1 week"
 
@@ -46,6 +47,8 @@ jobs:
             requirement: "nuitka==4.2.2"
           - label: "4.3"
             requirement: "nuitka==4.3"
+          - label: "4.3.1"
+            requirement: "nuitka==4.3.1"
           - label: "develop"
             requirement: >-
               nuitka @
