@@ -23,15 +23,16 @@
 # test `base_dir`, the remedy the report suggested. `cross-machine` is the
 # case the issue title names: two runners sharing one ccache directory.
 #
-# Every job runs on two Nuitka versions. 4.3 is the release the report was
-# retested on. The `develop` cell is pinned to the commit that links the
-# include directories into the build directory under stable names:
-# https://github.com/Nuitka/Nuitka/commit/381a18f17ecef962c05cbf5d456ec84f04cb78e6
+# Each job takes the Nuitka version from its `nuitka` matrix axis. The fix is
+# https://github.com/Nuitka/Nuitka/commit/381a18f17ecef962c05cbf5d456ec84f04cb78e6:
+# it links the include directories into the build directory under stable
+# names. On that commit, every build from a new install path hit all of its
+# files, where 4.3 missed all of them:
+# https://github.com/kdeldycke/nuitka-test/actions/runs/39437356431
 
 # Hold every install to the cooldown: nothing uploaded in the last week
 # resolves. Each command installing Nuitka exempts that one package, for a
-# release younger than the window, and leaves its dependencies gated. A git
-# source carries no upload date, so the cooldown does not apply to it.
+# release younger than the window, and leaves its dependencies gated.
 env:
   UV_EXCLUDE_NEWER: "1 week"
 
@@ -56,15 +57,12 @@ jobs:
         os:
           - macos-26          # arm64, the platform of the report
           - ubuntu-24.04      # x86, control: the mechanism is not macOS-specific
+        # `base_dir: false` skips builds 4 to 6: a version that carries the fix
+        # needs no remedy.
         nuitka:
           - label: "4.3"
             requirement: "nuitka==4.3"
             base_dir: true
-          # The fix leaves no include path below the workspace for `base_dir`
-          # to rewrite, so builds 4 to 6 have nothing to test on it.
-          - label: develop-381a18f17
-            requirement: "nuitka @ git+https://github.com/Nuitka/Nuitka@381a18f17ecef962c05cbf5d456ec84f04cb78e6"
-            base_dir: false
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -248,8 +246,6 @@ jobs:
         nuitka:
           - label: "4.3"
             requirement: "nuitka==4.3"
-          - label: develop-381a18f17
-            requirement: "nuitka @ git+https://github.com/Nuitka/Nuitka@381a18f17ecef962c05cbf5d456ec84f04cb78e6"
     runs-on: macos-26
     defaults:
       run:
@@ -298,8 +294,6 @@ jobs:
         nuitka:
           - label: "4.3"
             requirement: "nuitka==4.3"
-          - label: develop-381a18f17
-            requirement: "nuitka @ git+https://github.com/Nuitka/Nuitka@381a18f17ecef962c05cbf5d456ec84f04cb78e6"
     runs-on: macos-26
     defaults:
       run:
