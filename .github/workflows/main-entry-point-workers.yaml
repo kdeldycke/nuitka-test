@@ -1,0 +1,239 @@
+---
+"on":
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/main-entry-point-workers.yaml
+  workflow_dispatch:
+
+# Reproduce the launcher that Nuitka writes for `--main-entry-point` running the
+# entry point again in each multiprocessing worker. Not reported upstream yet.
+#
+# The launcher calls the entry point with no `if __name__ == "__main__":` guard.
+# A worker runs that launcher before its task: as `__parents_main__` when it
+# starts from a fork of the binary, or as an import when it starts from the
+# forkserver. The `papaya` program below starts one worker. Its `main()` returns
+# at once when it finds the variable its first run sets, so a worker that runs it
+# again exits instead of starting a pool of its own.
+#
+# The control compiles the same entry point from `launcher.py`, which has the
+# guard. The job stays red while the `--main-entry-point` binary runs `main()`
+# more than once, like the other reproducers here. A failing control makes the
+# result void.
+
+# Hold every install to the cooldown: nothing uploaded in the last week
+# resolves. A git source has no upload date, so the `develop` install of Nuitka
+# is not held, but its dependencies are.
+env:
+  UV_EXCLUDE_NEWER: "1 week"
+
+jobs:
+
+  main-entry-point-workers:
+    name: entry point runs once / ${{ matrix.os }} / Nuitka ${{ matrix.nuitka.label }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-26.04      # forkserver, the default of Python 3.14 on Linux
+          - macos-26          # spawn
+          - windows-2025      # spawn
+        nuitka:
+          - label: "4.3.1"
+            requirement: "nuitka==4.3.1"
+          - label: develop 61fda07b
+            requirement: "nuitka @ git+https://github.com/Nuitka/Nuitka@61fda07b448402fa4c34810477a65006b8c1c5b0"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    env:
+      NUITKA_REQUIREMENT: ${{ matrix.nuitka.requirement }}
+    steps:
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
+        with:
+          version: "0.11.13"
+      # Standalone builds on Linux need patchelf, which the runner image lacks.
+      - name: Install patchelf - Linux
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get --quiet update
+          sudo apt-get --quiet --yes --no-install-recommends install patchelf
+      - name: Setup venv
+        run: |
+          uv --no-progress venv --python 3.14
+      - name: Install Nuitka
+        run: |
+          uv --no-progress pip install "${NUITKA_REQUIREMENT}"
+      - name: nuitka --version
+        run: |
+          uv --no-progress run -- python -m nuitka --version
+
+      - name: Create the reproducer
+        run: |
+          mkdir papaya
+          cat > papaya/__init__.py <<'PY'
+          def square(value):
+              return value * value
+          PY
+          cat > papaya/__main__.py <<'PY'
+          import os
+          import sys
+          from concurrent.futures import ProcessPoolExecutor
+
+          from papaya import square
+
+
+          def main():
+              print(f"main() runs in process {os.getpid()}, parent {os.getppid()}", flush=True)
+              # Stops each worker at once. Without it, each worker starts a pool of its own.
+              if "PAPAYA_POOL" in os.environ:
+                  return 1
+              os.environ["PAPAYA_POOL"] = "1"
+              with ProcessPoolExecutor(max_workers=1) as pool:
+                  print(f"Square of 5: {pool.submit(square, 5).result()}", flush=True)
+              return 0
+
+
+          if __name__ == "__main__":
+              sys.exit(main())
+          PY
+          cat > launcher.py <<'PY'
+          import sys
+
+          import papaya.__main__ as user_main
+
+          if __name__ == "__main__":
+              sys.exit(user_main.main())
+          PY
+
+      # `--disable-cache=ccache` keeps Nuitka from fetching an unverified ccache
+      # on macOS: https://github.com/Nuitka/Nuitka/issues/3997
+      - name: Build with --main-entry-point
+        run: |
+          uv --no-progress run -- python -m nuitka --mode=standalone \
+            --assume-yes-for-downloads --disable-cache=ccache \
+            --project-name=papaya --main-entry-point=papaya=papaya.__main__:main \
+            --output-dir=entry-point
+      - name: Build the control from launcher.py
+        run: |
+          uv --no-progress run -- python -m nuitka --mode=standalone \
+            --assume-yes-for-downloads --disable-cache=ccache \
+            --output-dir=launcher launcher.py
+
+      - name: Run both binaries
+        run: |
+          uv --no-progress run -- python - <<'PY'
+          import os
+          import signal
+          import subprocess
+          import sys
+          from pathlib import Path
+
+          TIMEOUT = 60
+          """Seconds a binary may run before its whole process group is killed."""
+
+          def fail(message):
+              """Report a verdict on stdout, so it lands after the evidence it refers to.
+
+              `sys.exit(message)` writes to stderr, which the Actions log interleaves
+              ahead of buffered stdout, putting the conclusion before its own reasons.
+              """
+              print(message)
+              sys.stdout.flush()
+              sys.exit(1)
+
+          def find_binary(output_dir, name):
+              """Return the executable that a standalone build of `name` wrote."""
+              dists = sorted(Path(output_dir).glob("*.dist"))
+              for dist in dists:
+                  for path in sorted(dist.iterdir()):
+                      if not path.is_file() or not path.name.startswith(name):
+                          continue
+                      if os.name == "nt":
+                          if path.suffix.lower() == ".exe":
+                              return path
+                      elif path.suffix in ("", ".bin") and os.access(path, os.X_OK):
+                          return path
+              print(f"No {name} executable under {output_dir}:")
+              for dist in dists:
+                  for path in sorted(dist.iterdir()):
+                      print(f"  {path}")
+              fail("The build left no binary to run, so the test is void.")
+
+          def kill_tree(process):
+              """Kill every process of the group of the binary, the binary included."""
+              if os.name == "nt":
+                  subprocess.run(
+                      ["taskkill", "/T", "/F", "/PID", str(process.pid)],
+                      capture_output=True,
+                      check=False,
+                  )
+              else:
+                  try:
+                      os.killpg(process.pid, signal.SIGKILL)
+                  except ProcessLookupError:
+                      pass
+
+          def run_contained(binary, log):
+              """Run `binary` in a process group of its own, then kill that group.
+
+              The output goes to a file and not to a pipe, so a worker left behind
+              cannot keep the wait open.
+              """
+              options = {}
+              if os.name == "nt":
+                  options["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+              else:
+                  options["start_new_session"] = True
+              with open(log, "w", encoding="UTF-8") as stream:
+                  process = subprocess.Popen(
+                      [str(binary)], stdout=stream, stderr=subprocess.STDOUT, **options
+                  )
+                  timed_out = False
+                  try:
+                      process.wait(timeout=TIMEOUT)
+                  except subprocess.TimeoutExpired:
+                      timed_out = True
+                  kill_tree(process)
+                  process.wait()
+              output = Path(log).read_text(encoding="UTF-8", errors="replace")
+              return process.returncode, output, timed_out
+
+          def report(label, binary, result):
+              returncode, output, timed_out = result
+              print(f"\n{label}: {binary}")
+              killed = f", killed after {TIMEOUT} s" if timed_out else ""
+              print(f"exit code: {returncode}{killed}")
+              for line in output.splitlines():
+                  print(f"  {line}")
+
+          def main_runs(output):
+              return sum(line.startswith("main() runs in process") for line in output.splitlines())
+
+          entry_point = find_binary("entry-point", "papaya")
+          control = find_binary("launcher", "launcher")
+          entry_result = run_contained(entry_point, "entry-point.log")
+          control_result = run_contained(control, "launcher.log")
+          report("--main-entry-point", entry_point, entry_result)
+          report("control, launcher.py", control, control_result)
+          sys.stdout.flush()
+
+          code, output, timed_out = control_result
+          if timed_out or code != 0 or main_runs(output) != 1 or "Square of 5: 25" not in output:
+              fail("\nThe control did not run main() once and finish its task, so the test is void.")
+
+          code, output, timed_out = entry_result
+          if timed_out:
+              fail(f"\nThe --main-entry-point binary did not exit within {TIMEOUT} s.")
+          if main_runs(output) != 1:
+              fail(
+                  f"\nThe --main-entry-point binary ran main() {main_runs(output)} times, "
+                  "and the control once: each worker ran the entry point again."
+              )
+          if code != 0 or "Square of 5: 25" not in output:
+              fail(f"\nThe --main-entry-point binary exited with code {code} before it printed the square.")
+          print("\nBoth binaries ran main() once, and the worker returned the square.")
+          PY
