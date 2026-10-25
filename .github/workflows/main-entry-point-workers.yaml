@@ -7,15 +7,15 @@
       - .github/workflows/main-entry-point-workers.yaml
   workflow_dispatch:
 
-# Reproduce the launcher that Nuitka writes for `--main-entry-point` running the
-# entry point again in each multiprocessing worker. Not reported upstream yet.
+# Reproduce https://github.com/Nuitka/Nuitka/issues/4136
 #
-# The launcher calls the entry point with no `if __name__ == "__main__":` guard.
-# A worker runs that launcher before its task: as `__parents_main__` when it
-# starts from a fork of the binary, or as an import when it starts from the
-# forkserver. The `papaya` program below starts one worker. Its `main()` returns
-# at once when it finds the variable its first run sets, so a worker that runs it
-# again exits instead of starting a pool of its own.
+# The launcher that Nuitka writes for `--main-entry-point` calls the entry point
+# with no `if __name__ == "__main__":` guard. A worker runs that launcher before
+# its task: as `__parents_main__` when it starts from a fork of the binary, or
+# as an import when it starts from the forkserver. The `papaya` program below
+# starts one worker. Its `main()` returns at once when it finds the variable its
+# first run sets, so a worker that runs it again exits instead of starting a
+# pool of its own.
 #
 # The control compiles the same entry point from `launcher.py`, which has the
 # guard. The job stays red while the `--main-entry-point` binary runs `main()`
