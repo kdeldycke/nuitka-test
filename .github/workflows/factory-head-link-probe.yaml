@@ -13,24 +13,27 @@
 # on `undefined reference to 'constant_bin_data'`. Which builds does that reach,
 # and what does the source files index that head added hold?
 # Nuitka/Nuitka@b5585494a2a57672e5176b384d8c16c1e4d8e48b replaced the directory
-# scan of the Scons backend with that index.
+# scan of the Scons backend with that index, and writes it before Scons starts,
+# where the file defining that symbol appears during the Scons run.
 #
-# Each cell runs three builds and prints what each one left behind:
+# Each cell runs four builds and prints what each one left behind:
 #
-# - `plain`: one module, no `--main-entry-point`, which separates the entry
-#   point from the link.
-# - `entry-point`: the shape that failed, `--project-name` plus
+# - `hello`: one `print`, which is as small as a standalone build gets.
+# - `plain`: one module holding a constant, still no `--main-entry-point`.
+# - `entry-point`: the shape that failed first, `--project-name` plus
 #   `--main-entry-point`, with no multiprocessing in it.
 # - `entry-point-lto-off`: the same with `--lto=no`, which separates an LTO link
 #   that drops an object from a source file nobody compiled.
 #
 # The measurement beside each build lists the source files on disk that the
-# index does not name, and says whether `__constants.c`, which declares the
-# missing symbol, and its object file are there.
+# index does not name, and compares the time the index was written with the time
+# each of those files appeared.
 #
-# The `control b1e87a95` cells pin the commit below head, where the same three
-# builds link. A control that does not link makes the head result void. The head
-# cells stay red while the link error appears, like the other reproducers here.
+# The `parent c9f03657` cells pin the commit below head, where the same four
+# builds link. A control that does not link makes the head result void, and
+# turns its own cell red. A head cell stays red while a build stops at its link,
+# like the other reproducers here, so a green head cell means that platform
+# reproduces nothing.
 
 # Hold every install to the cooldown: nothing uploaded in the last week
 # resolves. A git source has no upload date, so the installs of Nuitka are not
@@ -53,8 +56,8 @@ jobs:
           - label: head b5585494
             requirement: "nuitka @ git+https://github.com/Nuitka/Nuitka@b5585494a2a57672e5176b384d8c16c1e4d8e48b"
             expect: bug
-          - label: control b1e87a95
-            requirement: "nuitka @ git+https://github.com/Nuitka/Nuitka@b1e87a953e5a012b284411c8646d81e8b4659357"
+          - label: parent c9f03657
+            requirement: "nuitka @ git+https://github.com/Nuitka/Nuitka@c9f03657bb8bfd3e6fa9bf777a0ca7bbc9016896"
             expect: links
     runs-on: ${{ matrix.os }}
     timeout-minutes: 25
@@ -86,6 +89,9 @@ jobs:
 
       - name: Create the reproducer
         run: |
+          cat > hello.py <<'PY'
+          print("Hello, World!")
+          PY
           cat > plain.py <<'PY'
           import sys
 
@@ -121,12 +127,13 @@ jobs:
 
       # `--disable-cache=ccache` keeps Nuitka from fetching an unverified ccache
       # on macOS: https://github.com/Nuitka/Nuitka/issues/3997
-      - name: Build the three targets and measure the index
+      - name: Build the four targets and measure the index
         run: |
           uv --no-progress run -- python - <<'PY'
           import os
           import subprocess
           import sys
+          import time
           from pathlib import Path
 
           SYMBOL = "constant_bin_data"
@@ -138,6 +145,7 @@ jobs:
           COMMON = ["--mode=standalone", "--assume-yes-for-downloads", "--disable-cache=ccache"]
 
           BUILDS = [
+              ("hello", "hello", ["hello.py"]),
               ("plain", "plain", ["plain.py"]),
               (
                   "entry-point",
@@ -181,10 +189,10 @@ jobs:
               return found[0] if found else None
 
           def sources_on_disk(directory):
-              """Return the C and C++ sources of a build directory, named as the index names them."""
+              """Return the C, C++ and header files of a build directory, named as the index names them."""
               names = set()
               for path in directory.rglob("*"):
-                  if not path.is_file() or path.suffix not in (".c", ".cpp"):
+                  if not path.is_file() or path.suffix not in (".c", ".cpp", ".h"):
                       continue
                   relative = path.relative_to(directory).as_posix()
                   # The index walks the build directory, `plugins` and `static_src` only.
@@ -196,6 +204,10 @@ jobs:
           def objects(directory, stem):
               """Return the compiled objects whose name starts with `stem`."""
               return sorted(path.name for path in directory.rglob(f"{stem}*.o*") if path.is_file())
+
+          def written_at(path):
+              """Return when a file was last written, to the second."""
+              return time.strftime("%H:%M:%S", time.localtime(path.stat().st_mtime))
 
           def measure(output_dir, directory):
               """Print what one build left behind: the index, the disk, and their difference."""
@@ -211,7 +223,8 @@ jobs:
                   return
               listed = {line.strip() for line in index.read_text(encoding="UTF-8").splitlines() if line.strip()}
               on_disk = sources_on_disk(directory)
-              print(f"  {INDEX_NAME}: {len(listed)} entries; sources on disk: {len(on_disk)}")
+              print(f"  {INDEX_NAME}: {len(listed)} entries, written at {written_at(index)}")
+              print(f"  sources on disk: {len(on_disk)}")
               print(f"  '__constants.c' in the index: {'__constants.c' in listed}")
               for label, names in (
                   ("on disk but not in the index", on_disk - listed),
@@ -220,6 +233,9 @@ jobs:
                   print(f"  {label}: {len(names)}")
                   for entry in sorted(names):
                       print(f"    {entry}")
+              for entry in sorted(on_disk - listed):
+                  path = directory / entry
+                  print(f"  '{entry}' was written at {written_at(path)}, after the index: {path.stat().st_mtime > index.stat().st_mtime}")
 
           results = {}
           for name, output_dir, flags in BUILDS:
@@ -243,10 +259,12 @@ jobs:
               broken = sorted(name for name, (code, hit) in results.items() if code != 0 or hit)
               if broken:
                   fail(f"\nThe control did not link: {', '.join(broken)}. The head result is void.")
-              print("\nThe control linked all three targets.")
+              print("\nThe control linked all four targets, so the head result stands on its own.")
+              sys.exit(0)
 
-          code, hit = results["entry-point"]
-          if code == 0 and not hit:
-              fail("\nThe --main-entry-point build linked at head, so this probe reproduces nothing.")
-          print(f"\nThe --main-entry-point build did not link at head, on '{SYMBOL}'.")
+          broken = sorted(name for name, (code, hit) in results.items() if hit)
+          if not broken:
+              print("\nNo build stopped at its link, so this cell reproduces nothing.")
+              sys.exit(0)
+          fail(f"\nThese builds stopped at their link on '{SYMBOL}': {', '.join(broken)}.")
           PY
