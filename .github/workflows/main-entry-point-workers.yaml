@@ -21,10 +21,16 @@
 # guard. The job stays red while the `--main-entry-point` binary runs `main()`
 # more than once, like the other reproducers here. A failing control makes the
 # result void.
+#
+# The `factory` cell pins the commit that adds the guard to the launcher,
+# Nuitka/Nuitka@b1e87a953e5a012b284411c8646d81e8b4659357, plus the commits
+# above it on the branch. It passes when the fix holds, and the `4.3.1` and
+# `develop` cells of the same run stay red, which shows this file still detects
+# the bug it was written for.
 
 # Hold every install to the cooldown: nothing uploaded in the last week
-# resolves. A git source has no upload date, so the `develop` install of Nuitka
-# is not held, but its dependencies are.
+# resolves. A git source has no upload date, so the `develop` and `factory`
+# installs of Nuitka are not held, but their dependencies are.
 env:
   UV_EXCLUDE_NEWER: "1 week"
 
@@ -44,6 +50,8 @@ jobs:
             requirement: "nuitka==4.3.1"
           - label: develop 61fda07b
             requirement: "nuitka @ git+https://github.com/Nuitka/Nuitka@61fda07b448402fa4c34810477a65006b8c1c5b0"
+          - label: factory b5585494
+            requirement: "nuitka @ git+https://github.com/Nuitka/Nuitka@b5585494a2a57672e5176b384d8c16c1e4d8e48b"
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     defaults:
