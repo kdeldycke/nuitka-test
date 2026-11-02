@@ -310,23 +310,16 @@ jobs:
         run: |
           python3 - <<'PY'
           import os
-          import re
-          from collections import Counter
+          import shutil
+          import subprocess
           from pathlib import Path
 
           compilers = set()
-          lookups = Counter()
           for log in Path("hello.build").glob("ccache-*.txt"):
               for line in log.read_text(encoding="UTF-8", errors="replace").splitlines():
                   # ccache logs its own argv: its binary, then the compiler it runs.
                   if "Command line: " in line:
                       compilers.add(line.split("Command line: ", 1)[1].split()[1])
-                  # ccache 4.9.1 logs each lookup in its inode cache, which keeps
-                  # file digests between calls. The ccache 4.2.1 that Nuitka
-                  # downloads on macOS leaves that cache off.
-                  found = re.search(r"Inode cache (hit|miss|insert): (\S+)", line)
-                  if found:
-                      lookups[found.group(2), found.group(1)] += 1
 
           identities = []
           for compiler in sorted(compilers):
@@ -336,8 +329,15 @@ jobs:
                   f"{stat.st_size} bytes, mtime {stat.st_mtime_ns} ns"
               )
               print(identities[-1])
-              kinds = ("hit", "miss", "insert")
-              print("  inode cache: " + ", ".join(f"{lookups[compiler, kind]} {kind}" for kind in kinds))
+              # On macOS, the compilers in `/usr/bin` are shims: each runs the
+              # tool of the selected developer directory, which `xcrun` names.
+              if shutil.which("xcrun"):
+                  tool = subprocess.run(
+                      ["xcrun", "--find", os.path.basename(compiler)],
+                      capture_output=True, text=True, encoding="UTF-8",
+                  ).stdout.strip()
+                  if tool:
+                      print(f"  xcrun runs {tool}: {os.stat(tool).st_size} bytes")
           Path(os.environ["COMPILER_REPORT"]).write_text("\n".join(identities) + "\n", encoding="UTF-8")
           PY
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
