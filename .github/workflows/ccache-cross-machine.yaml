@@ -32,6 +32,13 @@
 #
 # 4.3.4 is the newest release and does not carry the fix. The `4.4rc5` cell is
 # the pre-release commit of `develop`, which does.
+#
+# On Windows, Nuitka compiles with MSVC, and refuses its MinGW64 option on
+# Python 3.13. MSVC builds cache through Nuitka's inline copy of clcache, not
+# ccache, and the fix leaves their include paths as they are. In the mode
+# Nuitka selects, clcache leaves `/I` out of its key, and hashes the
+# preprocessed output with the size and mtime of `cl.exe`. `base_dir` and
+# `compiler_check` are ccache settings, so the Windows cells skip both.
 
 # Hold every install to the cooldown: nothing uploaded in the last week
 # resolves. Each command installing Nuitka exempts that one package, for a
@@ -62,6 +69,7 @@ jobs:
         os:
           - macos-26          # arm64, the platform of the report
           - ubuntu-24.04      # x86, control: the mechanism is not macOS-specific
+          - windows-2025      # x86, MSVC and clcache: see the header
         # `base_dir: false` skips builds 4 to 6: a version that carries the fix
         # needs no remedy.
         nuitka:
@@ -77,9 +85,10 @@ jobs:
         shell: bash
     env:
       CCACHE_DIR: ${{ github.workspace }}/shared-ccache
+      CLCACHE_DIR: ${{ github.workspace }}/shared-ccache
       NUITKA_CACHE_DIR: ${{ github.workspace }}/nuitka-cache
       NUITKA_REQUIREMENT: ${{ matrix.nuitka.requirement }}
-      BASE_DIR_BUILDS: ${{ matrix.nuitka.base_dir }}
+      BASE_DIR_BUILDS: ${{ matrix.nuitka.base_dir && !startsWith(matrix.os, 'windows') }}
     steps:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
         with:
@@ -118,6 +127,8 @@ jobs:
 
           NUITKA = os.environ["NUITKA_REQUIREMENT"]
           RESULT = re.compile(r"result '(cache hit|cache miss)': (\d+)")
+          # MSVC builds report one clcache total instead.
+          CLCACHE_RESULT = re.compile(r"using clcache with (\d+) cache hits and (\d+) cache misses")
           # An include path into the install, or into the stable links the fix
           # creates in the build directory.
           INCLUDE = re.compile(r"-I(\S*(?:site-packages/nuitka|stable_includes)\S*)")
@@ -156,7 +167,8 @@ jobs:
                   fail(f"build #{number} failed")
 
               # Nuitka reports the ccache tally on stderr, not stdout.
-              counts = {kind: int(value) for kind, value in RESULT.findall(proc.stdout + proc.stderr)}
+              output = proc.stdout + proc.stderr
+              counts = {kind: int(value) for kind, value in RESULT.findall(output)}
 
               # The ccache log records the command line ccache actually hashed,
               # so an include path that moved is visible in it.
@@ -167,6 +179,9 @@ jobs:
 
               hits = counts.get("cache hit", 0)
               misses = counts.get("cache miss", 0)
+              clcache = CLCACHE_RESULT.search(output)
+              if clcache:
+                  hits, misses = int(clcache[1]), int(clcache[2])
               print(f"build #{number}: {hits} hit(s), {misses} miss(es)")
               print(f"  nuitka imported from: {location}")
               for name, value in sorted((extra_env or {}).items()):
@@ -262,6 +277,7 @@ jobs:
         os:
           - macos-26
           - ubuntu-24.04
+          - windows-2025
         nuitka:
           - label: "4.3.4"
             requirement: "nuitka==4.3.4"
@@ -270,12 +286,15 @@ jobs:
         compiler_check:
           - content
           - mtime
-        # Without the fix, the install path alone makes every file miss, so the
-        # compiler check has nothing to change.
         exclude:
+          # Without the fix, the install path alone makes every file miss, so
+          # the compiler check has nothing to change.
           - nuitka:
               label: "4.3.4"
               requirement: "nuitka==4.3.4"
+            compiler_check: mtime
+          # clcache ignores ccache settings: see the header.
+          - os: windows-2025
             compiler_check: mtime
     runs-on: ${{ matrix.os }}
     defaults:
@@ -283,6 +302,7 @@ jobs:
         shell: bash
     env:
       CCACHE_DIR: ${{ github.workspace }}/shared-ccache
+      CLCACHE_DIR: ${{ github.workspace }}/shared-ccache
       CCACHE_COMPILERCHECK: ${{ matrix.compiler_check }}
       NUITKA_REQUIREMENT: ${{ matrix.nuitka.requirement }}
       COMPILER_REPORT: seed-compiler.txt
@@ -338,6 +358,10 @@ jobs:
                   ).stdout.strip()
                   if tool:
                       print(f"  xcrun runs {tool}: {os.stat(tool).st_size} bytes")
+          if not identities:
+              # MSVC builds use clcache, which writes no ccache log.
+              identities.append("no ccache log in hello.build")
+              print(identities[-1])
           Path(os.environ["COMPILER_REPORT"]).write_text("\n".join(identities) + "\n", encoding="UTF-8")
           PY
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -364,6 +388,7 @@ jobs:
         shell: bash
     env:
       CCACHE_DIR: ${{ github.workspace }}/shared-ccache
+      CLCACHE_DIR: ${{ github.workspace }}/shared-ccache
       CCACHE_COMPILERCHECK: ${{ matrix.compiler_check }}
       NUITKA_REQUIREMENT: ${{ matrix.nuitka.requirement }}
       COMPILER_REPORT: reuse-compiler.txt
@@ -415,14 +440,23 @@ jobs:
           if seed == reuse:
               fail("\nBoth runners imported Nuitka from the same path, so nothing was tested.")
 
-          print(f"\nCCACHE_COMPILERCHECK={os.environ['CCACHE_COMPILERCHECK']}")
+          log = Path("build.log").read_text(encoding="UTF-8", errors="replace")
+          # MSVC builds report one clcache total instead of ccache results.
+          clcache = re.search(r"using clcache with (\d+) cache hits and (\d+) cache misses", log)
+
+          if clcache:
+              print("\nclcache build: CCACHE_COMPILERCHECK has no effect")
+          else:
+              print(f"\nCCACHE_COMPILERCHECK={os.environ['CCACHE_COMPILERCHECK']}")
           print("runner 1 compiler: " + Path("seed-compiler.txt").read_text(encoding="UTF-8").strip())
           print("runner 2 compiler: " + Path("reuse-compiler.txt").read_text(encoding="UTF-8").strip())
 
-          log = Path("build.log").read_text(encoding="UTF-8", errors="replace")
-          counts = {kind: int(value) for kind, value in re.findall(r"result '(cache hit|cache miss)': (\d+)", log)}
-          hits = counts.get("cache hit", 0)
-          misses = counts.get("cache miss", 0)
+          if clcache:
+              hits, misses = int(clcache[1]), int(clcache[2])
+          else:
+              counts = {kind: int(value) for kind, value in re.findall(r"result '(cache hit|cache miss)': (\d+)", log)}
+              hits = counts.get("cache hit", 0)
+              misses = counts.get("cache miss", 0)
           print(f"\n{hits} hit(s), {misses} miss(es) against the cache the first runner wrote")
           sys.stdout.flush()
 
