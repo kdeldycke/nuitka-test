@@ -29,10 +29,14 @@
 # names. On that commit, every build from a new install path hit all of its
 # files, where 4.3 missed all of them:
 # https://github.com/kdeldycke/nuitka-test/actions/runs/39437356431
+#
+# 4.3.4 is the newest release and does not carry the fix. The `4.4rc5` cell is
+# the pre-release commit of `develop`, which does.
 
 # Hold every install to the cooldown: nothing uploaded in the last week
 # resolves. Each command installing Nuitka exempts that one package, for a
-# release younger than the window, and leaves its dependencies gated.
+# release younger than the window, and leaves its dependencies gated. A git
+# source carries no upload date, so the cooldown does not apply to it.
 env:
   UV_EXCLUDE_NEWER: "1 week"
 
@@ -41,7 +45,8 @@ jobs:
   # Three builds, one ccache, one machine. Build 2 repeats build 1 with the
   # same uv cache and is the control: it proves ccache works at all here. Only
   # build 3 changes the install path, so it is the only candidate explanation
-  # left when it misses.
+  # left when it misses. Builds 1 to 3 keep every other ccache setting at its
+  # default, `compiler_check = mtime` included, as a local build would.
   #
   # Builds 4 to 6 repeat the test with `base_dir` set to the workspace, which
   # holds the uv cache and the build directory. Build 4 reuses the install
@@ -60,9 +65,12 @@ jobs:
         # `base_dir: false` skips builds 4 to 6: a version that carries the fix
         # needs no remedy.
         nuitka:
-          - label: "4.3"
-            requirement: "nuitka==4.3"
+          - label: "4.3.4"
+            requirement: "nuitka==4.3.4"
             base_dir: true
+          - label: "4.4rc5"
+            requirement: "nuitka @ git+https://github.com/Nuitka/Nuitka@f074b08d4fbccf5d36244b23356fe7365c5f4941"
+            base_dir: false
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -79,7 +87,8 @@ jobs:
       # Nuitka downloads ccache on macOS and Windows. On Linux it expects the
       # OS package, and the runner image ships without one, which leaves the
       # job with nothing to measure.
-      - name: Install ccache - Linux
+      - &install-ccache-linux
+        name: Install ccache - Linux
         if: runner.os == 'Linux'
         run: |
           sudo apt-get --quiet update
@@ -238,24 +247,45 @@ jobs:
 
   # The case the issue title names. One runner writes the cache, a second
   # runner reads it, and the two never share a uv extraction.
+  #
+  # `compiler_check` decides how ccache identifies the compiler. `mtime`, the
+  # default, hashes the size and mtime of the compiler file, and `content`
+  # hashes its bytes. Each runner reports the size and mtime of the compiler
+  # ccache ran, which is what the `mtime` check compares.
   cross-machine-seed:
-    name: cross-machine, runner 1 writes the cache / Nuitka ${{ matrix.nuitka.label }}
-    strategy:
+    name: >-
+      cross-machine, runner 1 writes the cache / ${{ matrix.os }} / Nuitka ${{ matrix.nuitka.label }}
+      / ${{ matrix.compiler_check }}
+    strategy: &cross-machine-strategy
       fail-fast: false
       matrix:
+        os:
+          - macos-26
+          - ubuntu-24.04
         nuitka:
-          - label: "4.3"
-            requirement: "nuitka==4.3"
-    runs-on: macos-26
+          - label: "4.3.4"
+            requirement: "nuitka==4.3.4"
+          - label: "4.4rc5"
+            requirement: "nuitka @ git+https://github.com/Nuitka/Nuitka@f074b08d4fbccf5d36244b23356fe7365c5f4941"
+        compiler_check:
+          - content
+          - mtime
+        # Without the fix, the install path alone makes every file miss, so the
+        # compiler check has nothing to change.
+        exclude:
+          - nuitka:
+              label: "4.3.4"
+              requirement: "nuitka==4.3.4"
+            compiler_check: mtime
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         shell: bash
     env:
       CCACHE_DIR: ${{ github.workspace }}/shared-ccache
-      # Hash the compiler by its content: two VMs need not agree on its
-      # timestamp, and that would be a second reason to miss.
-      CCACHE_COMPILERCHECK: content
+      CCACHE_COMPILERCHECK: ${{ matrix.compiler_check }}
       NUITKA_REQUIREMENT: ${{ matrix.nuitka.requirement }}
+      COMPILER_REPORT: seed-compiler.txt
     steps:
       # No uv cache is restored or saved, so each runner extracts Nuitka into
       # a directory of its own.
@@ -263,6 +293,7 @@ jobs:
         with:
           version: "0.11.13"
           enable-cache: false
+      - *install-ccache-linux
       - name: Create the reproducer
         run: |
           printf 'print("hello world")\n' > hello.py
@@ -274,43 +305,79 @@ jobs:
         run: |
           uv --no-progress run --no-project --python 3.13 --exclude-newer-package nuitka=P0D --with "${NUITKA_REQUIREMENT}" -- \
             python -c "import nuitka; print(nuitka.__file__)" | tee seed-location.txt
+      - &report-compiler
+        name: Report the compiler ccache ran
+        run: |
+          python3 - <<'PY'
+          import os
+          import re
+          from collections import Counter
+          from pathlib import Path
+
+          compilers = set()
+          lookups = Counter()
+          for log in Path("hello.build").glob("ccache-*.txt"):
+              for line in log.read_text(encoding="UTF-8", errors="replace").splitlines():
+                  # ccache logs its own argv: its binary, then the compiler it runs.
+                  if "Command line: " in line:
+                      compilers.add(line.split("Command line: ", 1)[1].split()[1])
+                  # ccache 4.9.1 logs each lookup in its inode cache, which keeps
+                  # file digests between calls. The ccache 4.2.1 that Nuitka
+                  # downloads on macOS leaves that cache off.
+                  found = re.search(r"Inode cache (hit|miss|insert): (\S+)", line)
+                  if found:
+                      lookups[found.group(2), found.group(1)] += 1
+
+          identities = []
+          for compiler in sorted(compilers):
+              stat = os.stat(compiler)
+              identities.append(
+                  f"{compiler} ({os.path.realpath(compiler)}): "
+                  f"{stat.st_size} bytes, mtime {stat.st_mtime_ns} ns"
+              )
+              print(identities[-1])
+              kinds = ("hit", "miss", "insert")
+              print("  inode cache: " + ", ".join(f"{lookups[compiler, kind]} {kind}" for kind in kinds))
+          Path(os.environ["COMPILER_REPORT"]).write_text("\n".join(identities) + "\n", encoding="UTF-8")
+          PY
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
-          name: shared-ccache-${{ matrix.nuitka.label }}
+          name: shared-ccache-${{ matrix.os }}-${{ matrix.nuitka.label }}-${{ matrix.compiler_check }}
           path: |
             shared-ccache
             seed-location.txt
+            seed-compiler.txt
           include-hidden-files: true
           retention-days: 1
 
   cross-machine-reuse:
-    name: cross-machine, runner 2 reads the cache / Nuitka ${{ matrix.nuitka.label }}
+    name: >-
+      cross-machine, runner 2 reads the cache / ${{ matrix.os }} / Nuitka ${{ matrix.nuitka.label }}
+      / ${{ matrix.compiler_check }}
     needs: cross-machine-seed
-    # A failed seed of one version must not skip the other version.
+    # A failed seed of one cell must not skip the other cells.
     if: ${{ !cancelled() }}
-    strategy:
-      fail-fast: false
-      matrix:
-        nuitka:
-          - label: "4.3"
-            requirement: "nuitka==4.3"
-    runs-on: macos-26
+    strategy: *cross-machine-strategy
+    runs-on: ${{ matrix.os }}
     defaults:
       run:
         shell: bash
     env:
       CCACHE_DIR: ${{ github.workspace }}/shared-ccache
-      CCACHE_COMPILERCHECK: content
+      CCACHE_COMPILERCHECK: ${{ matrix.compiler_check }}
       NUITKA_REQUIREMENT: ${{ matrix.nuitka.requirement }}
+      COMPILER_REPORT: reuse-compiler.txt
     steps:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
         with:
           version: "0.11.13"
           enable-cache: false
-      # Restores `shared-ccache/` and `seed-location.txt` into the workspace.
+      - *install-ccache-linux
+      # Restores `shared-ccache/`, `seed-location.txt` and `seed-compiler.txt`
+      # into the workspace.
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
         with:
-          name: shared-ccache-${{ matrix.nuitka.label }}
+          name: shared-ccache-${{ matrix.os }}-${{ matrix.nuitka.label }}-${{ matrix.compiler_check }}
       - name: Create the reproducer
         run: |
           printf 'print("hello world")\n' > hello.py
@@ -322,9 +389,11 @@ jobs:
         run: |
           uv --no-progress run --no-project --python 3.13 --exclude-newer-package nuitka=P0D --with "${NUITKA_REQUIREMENT}" -- \
             python -m nuitka --mode=standalone --assume-yes-for-downloads hello.py 2>&1 | tee build.log
+      - *report-compiler
       - name: Check the cache was reused
         run: |
           python3 - <<'PY'
+          import os
           import re
           import sys
           from pathlib import Path
@@ -346,11 +415,15 @@ jobs:
           if seed == reuse:
               fail("\nBoth runners imported Nuitka from the same path, so nothing was tested.")
 
+          print(f"\nCCACHE_COMPILERCHECK={os.environ['CCACHE_COMPILERCHECK']}")
+          print("runner 1 compiler: " + Path("seed-compiler.txt").read_text(encoding="UTF-8").strip())
+          print("runner 2 compiler: " + Path("reuse-compiler.txt").read_text(encoding="UTF-8").strip())
+
           log = Path("build.log").read_text(encoding="UTF-8", errors="replace")
           counts = {kind: int(value) for kind, value in re.findall(r"result '(cache hit|cache miss)': (\d+)", log)}
           hits = counts.get("cache hit", 0)
           misses = counts.get("cache miss", 0)
-          print(f"{hits} hit(s), {misses} miss(es) against the cache the first runner wrote")
+          print(f"\n{hits} hit(s), {misses} miss(es) against the cache the first runner wrote")
           sys.stdout.flush()
 
           if hits == 0:
