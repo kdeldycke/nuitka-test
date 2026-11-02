@@ -267,6 +267,11 @@ jobs:
   # default, hashes the size and mtime of the compiler file, and `content`
   # hashes its bytes. Each runner reports the size and mtime of the compiler
   # ccache ran, which is what the `mtime` check compares.
+  #
+  # Each runner also reports the image it booted. GitHub rolls a new image out
+  # over days, so two runners can boot different ones, with other compilers or
+  # headers. A miss between two images says nothing about the install path,
+  # and the check calls it void.
   cross-machine-seed:
     name: >-
       cross-machine, runner 1 writes the cache / ${{ matrix.os }} / Nuitka ${{ matrix.nuitka.label }}
@@ -306,6 +311,7 @@ jobs:
       CCACHE_COMPILERCHECK: ${{ matrix.compiler_check }}
       NUITKA_REQUIREMENT: ${{ matrix.nuitka.requirement }}
       COMPILER_REPORT: seed-compiler.txt
+      IMAGE_REPORT: seed-image.txt
     steps:
       # No uv cache is restored or saved, so each runner extracts Nuitka into
       # a directory of its own.
@@ -364,6 +370,31 @@ jobs:
               print(identities[-1])
           Path(os.environ["COMPILER_REPORT"]).write_text("\n".join(identities) + "\n", encoding="UTF-8")
           PY
+      - &report-image
+        name: Report the runner image
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          # The file the "Set up job" step prints its "Runner Image" group from.
+          candidates = (
+              Path.home() / "imagedata.json",               # macOS
+              Path("/imagegeneration/imagedata.json"),      # Ubuntu
+              Path("C:/imagedata.json"),                    # Windows
+          )
+          image = "unknown"
+          for candidate in candidates:
+              if candidate.is_file():
+                  groups = json.loads(candidate.read_text(encoding="UTF-8"))
+                  detail = next(group["detail"] for group in groups if group["group"] == "Runner Image")
+                  fields = dict(line.split(": ", 1) for line in detail.splitlines() if ": " in line)
+                  image = f"{fields['Image']} {fields['Version']}"
+                  break
+          print(image)
+          Path(os.environ["IMAGE_REPORT"]).write_text(image + "\n", encoding="UTF-8")
+          PY
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
           name: shared-ccache-${{ matrix.os }}-${{ matrix.nuitka.label }}-${{ matrix.compiler_check }}
@@ -371,6 +402,7 @@ jobs:
             shared-ccache
             seed-location.txt
             seed-compiler.txt
+            seed-image.txt
           include-hidden-files: true
           retention-days: 1
 
@@ -392,14 +424,15 @@ jobs:
       CCACHE_COMPILERCHECK: ${{ matrix.compiler_check }}
       NUITKA_REQUIREMENT: ${{ matrix.nuitka.requirement }}
       COMPILER_REPORT: reuse-compiler.txt
+      IMAGE_REPORT: reuse-image.txt
     steps:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b  # v8.1.0
         with:
           version: "0.11.13"
           enable-cache: false
       - *install-ccache-linux
-      # Restores `shared-ccache/`, `seed-location.txt` and `seed-compiler.txt`
-      # into the workspace.
+      # Restores `shared-ccache/` and the `seed-*.txt` reports into the
+      # workspace.
       - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131  # v7.0.0
         with:
           name: shared-ccache-${{ matrix.os }}-${{ matrix.nuitka.label }}-${{ matrix.compiler_check }}
@@ -415,6 +448,7 @@ jobs:
           uv --no-progress run --no-project --python 3.13 --exclude-newer-package nuitka=P0D --with "${NUITKA_REQUIREMENT}" -- \
             python -m nuitka --mode=standalone --assume-yes-for-downloads hello.py 2>&1 | tee build.log
       - *report-compiler
+      - *report-image
       - name: Check the cache was reused
         run: |
           python3 - <<'PY'
@@ -458,8 +492,15 @@ jobs:
               hits = counts.get("cache hit", 0)
               misses = counts.get("cache miss", 0)
           print(f"\n{hits} hit(s), {misses} miss(es) against the cache the first runner wrote")
+
+          seed_image = Path("seed-image.txt").read_text(encoding="UTF-8").strip()
+          reuse_image = Path("reuse-image.txt").read_text(encoding="UTF-8").strip()
+          print(f"runner 1 image: {seed_image}")
+          print(f"runner 2 image: {reuse_image}")
           sys.stdout.flush()
 
+          if hits == 0 and seed_image != reuse_image:
+              fail("\nThe two runners booted different images, so their misses say nothing about the install path: the test is void.")
           if hits == 0:
               fail(f"\nEvery one of the {misses} file(s) missed on a second runner sharing the same ccache.")
           print("\nThe second runner reused the cache.")
